@@ -70,6 +70,93 @@
       "type": "object",
       "description": "Credentials for pulling model weights from object storage.",
       "properties": {
+        "secretStore": {
+          "type": "object",
+          "description": "The single External Secrets Operator store backing every model's credential.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "create": { "type": "boolean" },
+            "name": { "type": "string" },
+            "kind": {
+              "type": "string",
+              "enum": ["SecretStore", "ClusterSecretStore"]
+            },
+            "vault": {
+              "type": "object",
+              "properties": {
+                "server": {
+                  "type": "string",
+                  "comment": "Empty is allowed so the disabled default validates; _validate.tpl requires a real value once secretStore.enabled is set.",
+                  "pattern": "^(https?://.+)?$",
+                  "description": "Vault address including scheme. Required when storage.secretStore.enabled is true."
+                },
+                "path": { "type": "string", "description": "KV mount point." },
+                "version": { "type": "string", "enum": ["v1", "v2"] },
+                "namespace": { "type": "string", "description": "Vault Enterprise namespace." },
+                "caProviderConfigMap": { "type": "string" },
+                "caProviderConfigMapKey": { "type": "string" },
+                "auth": {
+                  "type": "object",
+                  "properties": {
+                    "kubernetes": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": { "type": "boolean" },
+                        "mountPath": { "type": "string" },
+                        "role": { "type": "string" },
+                        "serviceAccountRef": {
+                          "type": "object",
+                          "properties": {
+                            "name": { "type": "string" },
+                            "namespace": { "type": "string" }
+                          }
+                        }
+                      }
+                    },
+                    "appRole": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": { "type": "boolean" },
+                        "path": { "type": "string" },
+                        "roleId": { "type": "string" },
+                        "secretRef": {
+                          "type": "object",
+                          "properties": {
+                            "name": { "type": "string" },
+                            "key": { "type": "string" },
+                            "namespace": { "type": "string" }
+                          }
+                        }
+                      }
+                    },
+                    "tokenSecretRef": {
+                      "type": "object",
+                      "properties": {
+                        "name": { "type": "string" },
+                        "key": { "type": "string" },
+                        "namespace": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "externalSecrets": {
+          "type": "object",
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "enum": ["external-secrets.io/v1", "external-secrets.io/v1beta1"],
+              "description": "v1 is current; ESO older than 0.15 still serves v1beta1."
+            },
+            "refreshInterval": {
+              "type": "string",
+              "pattern": "^[0-9]+(s|m|h)$"
+            }
+          }
+        },
         "s3": {
           "type": "array",
           "description": "Named S3 credential profiles, referenced by inference.storageProfile.",
@@ -190,6 +277,40 @@
           "description": "Public bucket — no keys needed."
         },
         "caBundleConfigMap": { "type": "string" },
+        "externalSecret": {
+          "type": "object",
+          "description": "Vault-backed credentials: one Vault secret, ExternalSecret and ServiceAccount per model.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "basePath": {
+              "type": "string",
+              "pattern": "^[^/].*",
+              "description": "Vault folder holding one secret per model, relative to the KV mount. The model name (or inference.externalSecretKey) is appended."
+            },
+            "properties": {
+              "type": "object",
+              "description": "Field names inside each Vault secret.",
+              "properties": {
+                "accessKeyId": { "type": "string" },
+                "secretAccessKey": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "storeRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "kind": {
+                  "type": "string",
+                  "enum": ["SecretStore", "ClusterSecretStore"]
+                }
+              },
+              "additionalProperties": false
+            },
+            "refreshInterval": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
         "existingSecret": {
           "type": "string",
           "description": "Secret carrying awsAccessKeyID and awsSecretAccessKey. Mutually exclusive with create and roleArn."
@@ -288,6 +409,10 @@
               "type": "string",
               "pattern": "^(oci|hf|s3|pvc|gs|https?)://.+",
               "description": "Where the weights come from. s3:// and hf:// are fetched by the KServe storage-initializer initContainer into an emptyDir at /mnt/models; oci:// is a ModelCar image; pvc:// mounts a pre-populated volume. For a ModelCar the runtime image goes in `image`."
+            },
+            "externalSecretKey": {
+              "type": "string",
+              "description": "Name of this model's secret inside the profile's Vault basePath folder. Defaults to the model name."
             },
             "storageProfile": {
               "type": "string",

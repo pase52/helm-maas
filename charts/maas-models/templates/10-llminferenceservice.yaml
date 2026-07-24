@@ -48,14 +48,7 @@ storage-initializer resolves S3 credentials only from the Secrets attached to
 this ServiceAccount — without it, an s3:// modelUri fails to download.
 An explicit `serviceAccountName` wins over the profile's derived name.
 */}}
-{{- $sa := $inf.serviceAccountName | default "" -}}
-{{- if and (not $sa) $inf.storageProfile -}}
-{{- range $p := (($root.Values.storage | default dict).s3 | default list) -}}
-{{- if eq $p.name $inf.storageProfile -}}
-{{- $sa = $p.serviceAccountName | default (printf "maas-s3-%s" $p.name) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- $sa := include "maas-models.storageServiceAccount" (dict "root" $root "model" $m) -}}
 {{- if $sa -}}{{- $_ := set $template "serviceAccountName" $sa -}}{{- end -}}
 
 {{/*

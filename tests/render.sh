@@ -118,6 +118,41 @@ for env_dir in "${ROOT}"/environments/*/; do
     bad "${env}: s3:// models without usable credentials" "${s3_bad}"
   fi
 
+  # --- Vault chain: ExternalSecret -> Secret name -> ServiceAccount.secrets[].
+  # Every link is name-based and resolved at runtime by a different controller,
+  # so a rename in one place fails silently at pod start rather than at sync.
+  es_bad=""
+  while IFS=$'\t' read -r esname ns target; do
+    [[ -z "${esname}" ]] && continue
+    linked="$(yq -r "select(.kind==\"ServiceAccount\" and .metadata.namespace==\"${ns}\") | select([.secrets // [] | .[] | select(.name==\"${target}\")] | length > 0) | .metadata.name" "${out}" | head -1)"
+    if [[ -z "${linked}" ]]; then
+      es_bad="${es_bad} ${ns}/${esname}(Secret ${target} referenced by no ServiceAccount)"
+    fi
+    # mergePolicy Replace would discard the Vault data and leave an annotated,
+    # empty Secret — the failure looks like a credentials error on a Secret that
+    # renders correctly.
+    mp="$(yq -r "select(.kind==\"ExternalSecret\" and .metadata.name==\"${esname}\" and .metadata.namespace==\"${ns}\") | .spec.target.template.mergePolicy // \"Replace\"" "${out}")"
+    if [[ -n "$(yq -r "select(.kind==\"ExternalSecret\" and .metadata.name==\"${esname}\") | .spec.target.template.metadata.annotations // empty" "${out}")" && "${mp}" != "Merge" ]]; then
+      es_bad="${es_bad} ${ns}/${esname}(template sets annotations but mergePolicy=${mp}, which drops the Vault data)"
+    fi
+  done < <(yq -r 'select(.kind=="ExternalSecret") | .metadata.name + "\t" + .metadata.namespace + "\t" + .spec.target.name' "${out}")
+
+  es_total="$(yq -r 'select(.kind=="ExternalSecret") | .metadata.name' "${out}" | grep -c . || true)"
+  if [[ -z "${es_bad}" ]]; then
+    ok "${env}: all ${es_total} ExternalSecret(s) reach a ServiceAccount with data preserved"
+  else
+    bad "${env}: broken ExternalSecret chain" "${es_bad}"
+  fi
+
+  # --- every ExternalSecret names a store that is rendered here or declared external.
+  while IFS=$'\t' read -r esname store kind; do
+    [[ -z "${esname}" ]] && continue
+    if ! yq -e "select(.kind==\"${kind}\" and .metadata.name==\"${store}\")" "${out}" >/dev/null 2>&1; then
+      printf 'note  %s: %s references %s/%s, which this chart does not render — it must already exist\n' \
+        "${env}" "${esname}" "${kind}" "${store}"
+    fi
+  done < <(yq -r 'select(.kind=="ExternalSecret") | .metadata.name + "\t" + .spec.secretStoreRef.name + "\t" + .spec.secretStoreRef.kind' "${out}")
+
   # --- an s3:// model with no ephemeral-storage request on the storage-initializer
   # gets evicted partway through a large download. Advisory, not fatal.
   while IFS= read -r name; do

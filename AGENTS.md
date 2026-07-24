@@ -96,6 +96,10 @@ them from memory:
 | S3 credential resolution | IRSA SA annotation → cluster storage-secret annotation (unset by default) → **`serviceAccount.secrets[]`** |
 | S3 Secret data keys | `awsAccessKeyID`, `awsSecretAccessKey` — KServe defaults, do not rename |
 | S3 settings location | annotations on the **Secret** (`serving.kserve.io/s3-*`), not on the SA or the LLMIS |
+| ESO API version | `external-secrets.io/v1` is served+storage; `v1beta1` is no longer served in current ESO |
+| `ExternalSecret.spec.target.template.mergePolicy` | defaults to **`Replace`**, which discards provider data — must be `Merge` for a metadata-only template |
+| ESO Vault auth | `kubernetes` (preferred), `appRole`, `tokenSecretRef` — under `spec.provider.vault.auth` |
+| ClusterSecretStore `serviceAccountRef` | requires `namespace`; cluster-scoped stores cannot resolve a bare name |
 
 ### Model artifact loading
 
@@ -154,6 +158,20 @@ not the test.
    not the `LLMInferenceService`. Putting them anywhere else means the
    initContainer gets keys with no endpoint and silently tries AWS.
    *Enforced by:* `_validate.tpl` `annotateExistingSecret` guard.
+
+9. **Generated `ExternalSecret`s set `mergePolicy: Merge`.** ESO's template
+   defaults to `Replace`, which keeps only templated data and throws away
+   everything read from Vault. Since the template exists solely to attach the S3
+   annotations, `Replace` yields an annotated Secret with no keys — and the
+   symptom appears much later, as a credentials error on a Secret that renders
+   correctly.
+   *Enforced by:* `tests/render.sh` ExternalSecret chain check.
+
+10. **Placeholder defaults are worse than empty ones.** `storage.secretStore`
+    ships with `vault.server: ""` and `auth.kubernetes.role: ""` on purpose. A
+    plausible default such as `https://vault.example.com` satisfies validation
+    and fails at runtime against a host that does not exist. Leave required
+    fields empty and let `_validate.tpl` demand them.
 
 ---
 

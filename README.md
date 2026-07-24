@@ -268,10 +268,109 @@ the pod. Credential sources are mutually exclusive — pick one:
 
 | Source | Use |
 |---|---|
-| `existingSecret` | Production. Secret managed by ESO / Sealed Secrets |
+| `externalSecret` | **Production.** Vault via External Secrets, one secret per model |
+| `existingSecret` | A Secret you manage by other means |
 | `create: true` | Sandbox only — writes the access key into git |
 | `roleArn` | AWS IRSA. Annotates the ServiceAccount, no static keys at all |
 | `useAnonymousCredential: "true"` | Public bucket |
+
+### Vault credentials, one secret per model
+
+Define the store once — a single `ClusterSecretStore` shared by every model.
+Kubernetes auth means Vault validates the ESO controller's ServiceAccount token,
+so no static Vault credential is stored anywhere in the cluster:
+
+```yaml
+storage:
+  secretStore:
+    enabled: true
+    name: maas-vault
+    kind: ClusterSecretStore
+    vault:
+      server: https://vault.corp.example.com
+      path: secret            # KV mount
+      version: v2
+      auth:
+        kubernetes:
+          enabled: true
+          role: maas-models
+          serviceAccountRef:
+            name: external-secrets
+            namespace: external-secrets
+```
+
+Then point the bucket profile at a Vault folder. One secret per model lives in
+it, so a single model's key can be rotated or revoked without touching any other:
+
+```yaml
+  s3:
+    - name: models
+      endpoint: s3.openshift-storage.svc:443
+      region: us-east-1
+      externalSecret:
+        enabled: true
+        basePath: maas/models         # the folder
+        properties:                   # field names inside each Vault secret
+          accessKeyId: accessKeyId
+          secretAccessKey: secretAccessKey
+```
+
+Vault layout this expects:
+
+```
+secret/maas/models/granite-3-1-8b     { accessKeyId, secretAccessKey }
+secret/maas/models/llama-3-3-70b      { accessKeyId, secretAccessKey }
+```
+
+The key defaults to the model name. Override it per model when the Vault secret
+is named differently:
+
+```yaml
+models:
+  - name: llama-3-3-70b
+    inference:
+      storageProfile: models
+      externalSecretKey: llama-70b-prod    # -> secret/maas/models/llama-70b-prod
+```
+
+For each model the chart then renders an `ExternalSecret`, the `Secret` it
+produces (carrying the S3 annotations), and a `ServiceAccount` linking them:
+
+```
+ClusterSecretStore maas-vault                                   wave -8
+  └─ ExternalSecret  maas-s3-llama-3-3-70b                      wave -5
+       ├─ reads    secret/maas/models/llama-3-3-70b
+       └─ writes   Secret maas-s3-llama-3-3-70b
+                     awsAccessKeyID / awsSecretAccessKey
+                     + serving.kserve.io/s3-* annotations
+  └─ ServiceAccount  maas-s3-llama-3-3-70b  →  that Secret       wave -5
+       └─ referenced by the LLMInferenceService pod              wave  0
+```
+
+Two things this gets right that are easy to get wrong by hand:
+
+- The generated `ExternalSecret` sets **`mergePolicy: Merge`**. ESO's template
+  defaults to `Replace`, which discards everything fetched from Vault — leaving
+  a correctly annotated Secret with no keys, and an initContainer reporting
+  `Unable to locate credentials` on a Secret that looks fine in the UI.
+- The S3 settings go on the **Secret's** annotations, via the ExternalSecret
+  template. KServe reads them from there, not from the ServiceAccount.
+
+Credential rotation in Vault is picked up by ESO within `refreshInterval`, but
+the running model pod does **not** re-read it: the credential is consumed once,
+by the initContainer, at pod start. Rotation therefore takes effect on the next
+pod restart, which matters if you revoke the old key immediately.
+
+If ESO is managed by the platform team and the store already exists, skip
+rendering it:
+
+```yaml
+storage:
+  secretStore:
+    enabled: true
+    create: false        # reference only
+    name: platform-vault
+```
 
 Two things to size before you deploy:
 

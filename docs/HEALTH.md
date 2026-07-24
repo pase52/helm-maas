@@ -231,6 +231,49 @@ prunes the externally-managed credential keys, leaving an annotated Secret with
 no data — the initContainer then reports `Unable to locate credentials` on a
 Secret that looks correct in the Argo CD UI.
 
+### When credentials come from Vault
+
+With `externalSecret` profiles there is one more link to check: ESO must have
+actually written the Secret. Work outward from the ExternalSecret.
+
+```bash
+NS=llm-prod; MODEL=llama-3-3-70b
+
+# Did ESO sync? SecretSynced=True is what you want.
+oc get externalsecret maas-s3-$MODEL -n $NS
+oc get externalsecret maas-s3-$MODEL -n $NS \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+
+# Which Vault path is it reading?
+oc get externalsecret maas-s3-$MODEL -n $NS -o jsonpath='{.spec.data[*].remoteRef.key}{"\n"}'
+
+# Is the store itself healthy? One store serves every model, so a fault here
+# takes out the whole catalogue at once.
+oc get clustersecretstore maas-vault \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
+
+# ESO controller logs
+oc logs -n external-secrets -l app.kubernetes.io/name=external-secrets --tail=100
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `SecretSyncedError`, `permission denied` | Vault policy on the role does not cover the path | Grant read on `<mount>/data/<basePath>/*` to the `maas-models` role |
+| `SecretSyncedError`, `key not found` | No Vault secret for this model | Create `<basePath>/<model>`, or set `inference.externalSecretKey` to the real name |
+| Synced, but Secret has annotations and **no keys** | `mergePolicy: Replace` on a metadata-only template | Must be `Merge`. `./tests/render.sh` catches this |
+| Synced, but the model still cannot authenticate | ServiceAccount not linked to the Secret | `oc get sa maas-s3-$MODEL -n $NS -o jsonpath='{.secrets[*].name}'` |
+| `ClusterSecretStore` `Ready=False`, `permission denied` | ESO's ServiceAccount is not bound to the Vault role | Check the Vault Kubernetes auth role's `bound_service_account_names` / `_namespaces` |
+| Store `Ready=False`, x509 error | Vault served by a private CA | Set `vault.caProviderConfigMap` |
+| Every model broken at once | The shared store is down | Check the store first — it is the single point of failure by design |
+
+A rotated Vault key does **not** reach a running pod. ESO updates the Secret on
+its `refreshInterval`, but the credential is read once, by the initContainer, at
+pod start. After rotating, restart the model pods before revoking the old key:
+
+```bash
+oc delete pod -n $NS -l maas.pase52.io/model=$MODEL
+```
+
 To confirm what the controller actually injected:
 
 ```bash

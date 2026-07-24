@@ -32,6 +32,31 @@ namespaces:
 # Object storage — credentials for models served from S3/ODF.
 # -----------------------------------------------------------------------------
 storage:
+  # One store for the whole platform. Kubernetes auth means Vault validates the
+  # ESO controller's ServiceAccount token — no static Vault credential is stored
+  # anywhere in the cluster.
+  secretStore:
+    enabled: true
+    create: true
+    name: maas-vault
+    kind: ClusterSecretStore
+    vault:
+      server: https://vault.example.com
+      path: secret
+      version: v2
+      auth:
+        kubernetes:
+          enabled: true
+          mountPath: kubernetes
+          role: maas-models
+          serviceAccountRef:
+            name: external-secrets
+            namespace: external-secrets
+
+  externalSecrets:
+    apiVersion: external-secrets.io/v1
+    refreshInterval: 1h
+
   s3:
     - name: models
       enabled: true
@@ -41,12 +66,16 @@ storage:
       region: us-east-1
       useHttps: "1"
       verifySsl: "1"
-      # The Secret's *data* is managed by the External Secrets Operator; the
-      # chart only stamps the S3 settings onto it as annotations, which is where
-      # KServe reads them from. Requires ServerSideApply so the ESO-managed keys
-      # are not pruned — already set in this environment's syncOptions.
-      existingSecret: odf-model-bucket
-      annotateExistingSecret: true
+      # One Vault secret per model, all under secret/maas/models/<model-name>,
+      # each holding accessKeyId and secretAccessKey. Per-model rather than a
+      # shared bucket credential so one model's key can be rotated or revoked
+      # without touching the others.
+      externalSecret:
+        enabled: true
+        basePath: maas/models
+        properties:
+          accessKeyId: accessKeyId
+          secretAccessKey: secretAccessKey
 
 argocd:
   enabled: true

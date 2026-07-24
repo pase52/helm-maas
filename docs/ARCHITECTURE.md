@@ -175,6 +175,57 @@ has settings but no way to apply them.
 Secret keys are KServe's defaults and must not be renamed: `awsAccessKeyID`,
 `awsSecretAccessKey`.
 
+### Vault, one secret per model
+
+The production arrangement uses a single External Secrets Operator store and one
+Vault secret per model, all in one folder:
+
+```
+         Vault
+         secret/maas/models/granite-3-1-8b   { accessKeyId, secretAccessKey }
+         secret/maas/models/llama-3-3-70b    { accessKeyId, secretAccessKey }
+              ▲
+              │ Kubernetes auth — Vault validates the ESO
+              │ ServiceAccount token; no static credential in-cluster
+              │
+   ClusterSecretStore maas-vault                            (one, cluster-wide)
+              │
+   ┌──────────┴───────────┐         one per model
+   ▼                      ▼
+ExternalSecret         ExternalSecret        maas-s3-<model>, in the model namespace
+   │                      │
+   ▼                      ▼
+Secret                 Secret                awsAccessKeyID / awsSecretAccessKey
+   │                      │                  + serving.kserve.io/s3-* annotations
+   ▼                      ▼
+ServiceAccount         ServiceAccount        secrets[] → the Secret above
+   │                      │
+   └──────────┬───────────┘
+              ▼
+   LLMInferenceService.spec.template.serviceAccountName
+```
+
+Per-model rather than one shared bucket credential, so a single model's key can
+be rotated or revoked without disturbing the rest of the catalogue, and so an
+audit of "who could read which prefix" resolves to one Vault path per model.
+
+Two failure modes the chart is specifically shaped to avoid:
+
+- **`mergePolicy`.** ESO's `target.template` defaults to `Replace`, which keeps
+  only templated data and discards everything fetched from the provider. A
+  metadata-only template — which is what applying the S3 annotations needs —
+  would therefore produce an annotated Secret with no keys. The chart sets
+  `mergePolicy: Merge`, and `tests/render.sh` fails if that regresses.
+- **Where the S3 settings live.** They must end up as annotations on the
+  generated Secret. Setting them on the ExternalSecret's own metadata, or on the
+  ServiceAccount, silently yields credentials with no endpoint, and the
+  initContainer falls back to the real AWS S3.
+
+Rotation semantics are worth stating plainly: ESO refreshes the Secret on its
+`refreshInterval`, but a running model pod does not re-read it. The credential is
+consumed once, by the initContainer, at pod start. A rotated key takes effect on
+the next pod restart.
+
 ### Operational consequences
 
 - Weights occupy **node ephemeral storage**, not a PVC, and are re-fetched on

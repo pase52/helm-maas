@@ -185,6 +185,87 @@ Usage: include "maas-models.subjectBlock" (dict "groups" $g "users" $u)
 {{- end -}}
 
 {{/*
+=============================================================================
+Object storage
+=============================================================================
+Look up the storage.s3 profile a model references. Returns the profile as JSON,
+or "{}" when the model names none.
+Usage: {{- $p := (include "maas-models.storageProfile" (dict "root" $ "model" $m) | fromJson) }}
+*/}}
+{{- define "maas-models.storageProfile" -}}
+{{- $name := ((.model.inference | default dict).storageProfile | default "") -}}
+{{- $out := dict -}}
+{{- if $name -}}
+{{- range $p := ((.root.Values.storage | default dict).s3 | default list) -}}
+{{- if eq $p.name $name -}}{{- $out = $p -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end -}}
+
+{{/*
+Name of the ServiceAccount that carries a model's object-storage credentials.
+Empty when the model needs none.
+
+The name depends on the credential source, because the ServiceAccount has to
+point at whichever Secret holds the keys:
+  · explicit serviceAccountName  -> used as-is (a ServiceAccount you manage)
+  · Vault ExternalSecret         -> per model, since each model has its own
+                                    Vault secret and therefore its own Secret
+  · shared Secret / IRSA         -> per profile, one ServiceAccount for all
+                                    models using that bucket
+*/}}
+{{- define "maas-models.storageServiceAccount" -}}
+{{- $inf := .model.inference | default dict -}}
+{{- if $inf.serviceAccountName -}}
+{{- $inf.serviceAccountName -}}
+{{- else -}}
+{{- $p := (include "maas-models.storageProfile" (dict "root" .root "model" .model) | fromJson) -}}
+{{- if $p.name -}}
+{{- if (($p.externalSecret | default dict).enabled) -}}
+{{- printf "maas-s3-%s" .model.name -}}
+{{- else -}}
+{{- $p.serviceAccountName | default (printf "maas-s3-%s" $p.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The Vault key holding a model's credential. One secret per model, all under the
+profile's basePath folder.
+*/}}
+{{- define "maas-models.vaultKey" -}}
+{{- $inf := .model.inference | default dict -}}
+{{- $key := $inf.externalSecretKey | default .model.name -}}
+{{- $base := ((.profile.externalSecret | default dict).basePath | default "") | trimSuffix "/" -}}
+{{- if $base -}}
+{{- printf "%s/%s" $base $key -}}
+{{- else -}}
+{{- $key -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+S3 connection settings as Secret annotations. KServe reads these from the
+Secret, not from the ServiceAccount or the LLMInferenceService. Values pass
+straight through to environment variables, so they are strings.
+*/}}
+{{- define "maas-models.s3Annotations" -}}
+{{- $p := . -}}
+{{- $ann := dict -}}
+{{- with $p.endpoint }}{{- $_ := set $ann "serving.kserve.io/s3-endpoint" (. | toString) }}{{- end }}
+{{- with $p.region }}{{- $_ := set $ann "serving.kserve.io/s3-region" (. | toString) }}{{- end }}
+{{- with $p.useHttps }}{{- $_ := set $ann "serving.kserve.io/s3-usehttps" (. | toString) }}{{- end }}
+{{- with $p.verifySsl }}{{- $_ := set $ann "serving.kserve.io/s3-verifyssl" (. | toString) }}{{- end }}
+{{- with $p.useVirtualBucket }}{{- $_ := set $ann "serving.kserve.io/s3-usevirtualbucket" (. | toString) }}{{- end }}
+{{- with $p.useAccelerate }}{{- $_ := set $ann "serving.kserve.io/s3-useaccelerate" (. | toString) }}{{- end }}
+{{- with $p.useAnonymousCredential }}{{- $_ := set $ann "serving.kserve.io/s3-useanoncredential" (. | toString) }}{{- end }}
+{{- with $p.caBundleConfigMap }}{{- $_ := set $ann "serving.kserve.io/s3-cabundle-configmap" (. | toString) }}{{- end }}
+{{- $ann | toJson -}}
+{{- end -}}
+
+{{/*
 Comma-joined names of a model list. Used for the `managed-models` annotation so
 `oc describe maasauthpolicy X` shows what it covers without cross-referencing.
 Usage: include "maas-models.modelNames" $modelList

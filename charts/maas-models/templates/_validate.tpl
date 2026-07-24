@@ -68,10 +68,46 @@ instead of syncing "Healthy" while a model silently never serves traffic.
           {{- fail (printf "models[%s]: storage profile %q is disabled, so no ServiceAccount is rendered and the download will fail with a credentials error" $m.name $profileName) -}}
         {{- end -}}
         {{/* Exactly one credential source, or the ServiceAccount points at nothing usable. */}}
+        {{- $es := $found.externalSecret | default dict -}}
         {{- $sources := list -}}
+        {{- if $es.enabled -}}{{- $sources = append $sources "externalSecret" -}}{{- end -}}
         {{- if $found.existingSecret -}}{{- $sources = append $sources "existingSecret" -}}{{- end -}}
         {{- if $found.create -}}{{- $sources = append $sources "create" -}}{{- end -}}
         {{- if $found.roleArn -}}{{- $sources = append $sources "roleArn" -}}{{- end -}}
+
+        {{/* --- Vault / External Secrets --- */}}
+        {{- if $es.enabled -}}
+          {{- $store := ($root.Values.storage | default dict).secretStore | default dict -}}
+          {{- $storeRef := $es.storeRef | default dict -}}
+          {{/*
+          `storage.secretStore.name` carries a default, so its presence proves
+          nothing — the store only exists if it was enabled, or if this profile
+          points at one managed elsewhere.
+          */}}
+          {{- if and (not $store.enabled) (not $storeRef.name) -}}
+            {{- fail (printf "storage.s3[%s]: `externalSecret.enabled` is set but no secret store is available. Set `storage.secretStore.enabled: true` with the Vault settings, or point this profile at a store managed elsewhere with `externalSecret.storeRef.name`." $profileName) -}}
+          {{- end -}}
+          {{- $storeName := $storeRef.name | default $store.name -}}
+          {{- if not $storeName -}}
+            {{- fail (printf "storage.s3[%s]: no secret store name resolved — set `storage.secretStore.name` or `externalSecret.storeRef.name`" $profileName) -}}
+          {{- end -}}
+          {{- if not $es.basePath -}}
+            {{- fail (printf "storage.s3[%s]: `externalSecret.basePath` is required — it is the Vault folder holding one secret per model, e.g. maas/models. The model name (or `inference.externalSecretKey`) is appended to it." $profileName) -}}
+          {{- end -}}
+          {{- if hasPrefix "/" $es.basePath -}}
+            {{- fail (printf "storage.s3[%s]: `externalSecret.basePath` must not start with / — it is relative to the KV mount configured as storage.secretStore.vault.path" $profileName) -}}
+          {{- end -}}
+          {{/*
+          A store this chart neither renders nor was told to reference by name is
+          almost always a typo; ESO reports SecretSyncedError only at runtime.
+          */}}
+          {{- if and $store.enabled $store.create (not $storeRef.name) -}}
+            {{- $wantKind := $storeRef.kind | default $store.kind | default "ClusterSecretStore" -}}
+            {{- if ne $wantKind ($store.kind | default "ClusterSecretStore") -}}
+              {{- fail (printf "storage.s3[%s]: `externalSecret.storeRef.kind: %s` does not match the rendered store kind %s" $profileName $wantKind ($store.kind | default "ClusterSecretStore")) -}}
+            {{- end -}}
+          {{- end -}}
+        {{- end -}}
         {{- if empty $sources -}}
           {{- if ne ($found.useAnonymousCredential | toString) "true" -}}
             {{- fail (printf "storage.s3[%s]: no credential source. Set one of `existingSecret` (recommended), `create: true` (sandbox only), or `roleArn` (AWS IRSA) — or `useAnonymousCredential: \"true\"` for a public bucket." $profileName) -}}
@@ -154,6 +190,62 @@ instead of syncing "Healthy" while a model silently never serves traffic.
     {{- end -}}
   {{- end -}}
 
+{{- end -}}
+
+{{/* --- secret store ----------------------------------------------------- */}}
+{{- $store := ($root.Values.storage | default dict).secretStore | default dict -}}
+{{- if and $store.enabled $store.create -}}
+  {{- if not $store.name -}}
+    {{- fail "storage.secretStore: `name` is required" -}}
+  {{- end -}}
+  {{- if not (has ($store.kind | default "ClusterSecretStore") (list "SecretStore" "ClusterSecretStore")) -}}
+    {{- fail (printf "storage.secretStore: `kind` must be SecretStore or ClusterSecretStore, got %q" $store.kind) -}}
+  {{- end -}}
+  {{- $vault := $store.vault | default dict -}}
+  {{- if not $vault.server -}}
+    {{- fail "storage.secretStore.vault: `server` is required, e.g. https://vault.example.com" -}}
+  {{- end -}}
+  {{- if not (hasPrefix "http" $vault.server) -}}
+    {{- fail (printf "storage.secretStore.vault: `server` must include the scheme, got %q" $vault.server) -}}
+  {{- end -}}
+  {{- if not (has ($vault.version | default "v2") (list "v1" "v2")) -}}
+    {{- fail (printf "storage.secretStore.vault: `version` must be v1 or v2, got %q" $vault.version) -}}
+  {{- end -}}
+  {{- $auth := $vault.auth | default dict -}}
+  {{- $k8s := $auth.kubernetes | default dict -}}
+  {{- $approle := $auth.appRole | default dict -}}
+  {{- $token := $auth.tokenSecretRef | default dict -}}
+  {{- $methods := list -}}
+  {{- if $k8s.enabled -}}{{- $methods = append $methods "kubernetes" -}}{{- end -}}
+  {{- if $approle.enabled -}}{{- $methods = append $methods "appRole" -}}{{- end -}}
+  {{- if $token.name -}}{{- $methods = append $methods "tokenSecretRef" -}}{{- end -}}
+  {{- if empty $methods -}}
+    {{- fail "storage.secretStore.vault.auth: no authentication method enabled. Prefer `kubernetes` — Vault validates the ESO ServiceAccount token, so no static credential is stored in the cluster." -}}
+  {{- end -}}
+  {{- if gt (len $methods) 1 -}}
+    {{- fail (printf "storage.secretStore.vault.auth: %s are mutually exclusive — enable one" (join " and " $methods)) -}}
+  {{- end -}}
+  {{- if $k8s.enabled -}}
+    {{- if not $k8s.role -}}
+      {{- fail "storage.secretStore.vault.auth.kubernetes: `role` is required — it is the Vault role bound to the ESO ServiceAccount" -}}
+    {{- end -}}
+    {{- if not (($k8s.serviceAccountRef | default dict).name) -}}
+      {{- fail "storage.secretStore.vault.auth.kubernetes: `serviceAccountRef.name` is required" -}}
+    {{- end -}}
+    {{/*
+    A ClusterSecretStore is cluster-scoped, so a bare ServiceAccount name is
+    ambiguous — ESO cannot guess which namespace it lives in.
+    */}}
+    {{- if and (eq ($store.kind | default "ClusterSecretStore") "ClusterSecretStore") (not (($k8s.serviceAccountRef | default dict).namespace)) -}}
+      {{- fail "storage.secretStore.vault.auth.kubernetes: `serviceAccountRef.namespace` is required for a ClusterSecretStore — a cluster-scoped store cannot resolve a bare ServiceAccount name" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if and $approle.enabled (not $approle.roleId) -}}
+    {{- fail "storage.secretStore.vault.auth.appRole: `roleId` is required" -}}
+  {{- end -}}
+  {{- if and $approle.enabled (not (($approle.secretRef | default dict).name)) -}}
+    {{- fail "storage.secretStore.vault.auth.appRole: `secretRef.name` is required — the Secret holding the AppRole secretId" -}}
+  {{- end -}}
 {{- end -}}
 
 {{/* --- access policies ------------------------------------------------- */}}
