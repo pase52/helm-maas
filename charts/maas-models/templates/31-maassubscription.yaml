@@ -1,0 +1,54 @@
+{{/*
+MaaSSubscription — token quotas per group/user, per model.
+
+maas-controller expands each of these into Kuadrant TokenRateLimitPolicies
+enforced by Limitador. `priority` breaks ties when a caller is covered by more
+than one subscription: highest priority wins.
+
+`window` accepts s|m|h with a 1–9999 magnitude. Days were removed from the API —
+express a daily quota as 24h.
+*/}}
+{{- $root := . -}}
+{{- range $s := .Values.subscriptions }}
+{{- if ne $s.enabled false }}
+{{- $models := (include "maas-models.selectModels" (dict "root" $root "selector" $s.modelSelector) | fromJsonArray) }}
+{{- $owner := $s.owner | default dict }}
+{{- $ann := dict }}
+{{- $_ := set $ann "openshift.io/display-name" ($s.displayName | default $s.name) }}
+{{- with $s.description }}{{- $_ := set $ann "openshift.io/description" . }}{{- end }}
+{{- $_ := set $ann "maas.pase52.io/managed-models" (include "maas-models.modelNames" $models) }}
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: {{ $s.name }}
+  namespace: {{ $root.Values.global.tenantNamespace }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "component" "subscription"
+        "wave" "governance"
+        "annotations" (merge $ann ($s.annotations | default dict))
+        "extraLabels" (merge (dict "maas.pase52.io/plan" $s.name) ($s.labels | default dict))) | nindent 2 }}
+spec:
+  owner:
+    {{- include "maas-models.subjectBlock" (dict "groups" $owner.groups "users" $owner.users) | nindent 4 }}
+  priority: {{ $s.priority | default 0 | int }}
+  modelRefs:
+    {{- range $m := $models }}
+    {{- $ovr := get ($s.perModel | default dict) $m.name | default dict }}
+    - name: {{ $m.name }}
+      namespace: {{ include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+      tokenRateLimits:
+        {{- toYaml ($ovr.tokenRateLimits | default $s.tokenRateLimits) | nindent 8 }}
+      {{- $billing := $ovr.billingRate | default $s.billingRate }}
+      {{- with $billing }}
+      billingRate:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+  {{- with $s.tokenMetadata }}
+  tokenMetadata:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

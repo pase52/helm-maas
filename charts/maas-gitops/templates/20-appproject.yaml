@@ -1,0 +1,65 @@
+{{- if .Values.appProject.enabled }}
+{{- $p := .Values.appProject -}}
+{{/*
+AppProject — the blast-radius boundary. It constrains which repos these
+Applications may read, which namespaces they may write to, and which kinds they
+may never touch, regardless of what a values.yaml says.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ $p.name }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "maas-gitops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-project
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  description: {{ $p.description | quote }}
+
+  sourceRepos:
+    {{- toYaml $p.sourceRepos | nindent 4 }}
+
+  destinations:
+    {{- toYaml $p.destinations | nindent 4 }}
+
+  {{- with $p.clusterResourceWhitelist }}
+  clusterResourceWhitelist:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $p.namespaceResourceWhitelist }}
+  namespaceResourceWhitelist:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $p.namespaceResourceBlacklist }}
+  namespaceResourceBlacklist:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $p.roles }}
+  roles:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $p.syncWindows }}
+  syncWindows:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $p.signatureKeys }}
+  signatureKeys:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- if $p.orphanedResources.enabled }}
+  orphanedResources:
+    warn: {{ $p.orphanedResources.warn }}
+    {{- with $p.orphanedResources.ignore }}
+    ignore:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+{{- end }}

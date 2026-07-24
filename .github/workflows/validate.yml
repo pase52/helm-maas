@@ -1,0 +1,89 @@
+name: validate
+
+# Every change to a values file is a production access or capacity change.
+# These checks run before review, not after merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  charts:
+    name: Render and invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Install yq
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Render charts and assert invariants
+        run: ./tests/render.sh
+
+  healthchecks:
+    name: Argo CD health checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: tests/lua/go.mod
+
+      - name: Install yq
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      # Executes the rendered Lua in gopher-lua, the interpreter Argo CD embeds.
+      # A broken health check fails neither a Helm render nor a sync — it just
+      # silently reports every model Healthy. This job is what catches that.
+      - name: Run health check suite
+        run: ./tests/lua/run.sh
+
+  kubeconform:
+    name: Schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      # The MaaS and KServe CRDs are not in the upstream schema catalogue, so
+      # they are skipped here. Their shape is covered by values.schema.json and
+      # the render invariants; this job catches malformed core objects.
+      - name: Validate rendered manifests
+        run: |
+          for env in environments/*/; do
+            name="$(basename "$env")"
+            echo "==> $name"
+            helm template "maas-$name" charts/maas-models \
+              -f "$env/values.yaml" --kube-version 1.32.0 \
+              | kubeconform -strict -summary \
+                  -kubernetes-version 1.32.0 \
+                  -skip 'MaaSModelRef,MaaSAuthPolicy,MaaSSubscription,ExternalModel,LLMInferenceService,PrometheusRule'
+          done

@@ -1,0 +1,67 @@
+{{/*
+ExternalModel — a model hosted outside the cluster (OpenAI, Anthropic, Bedrock…)
+fronted by the MaaS gateway so it is governed by the same AuthPolicy and token
+quotas as on-cluster models.
+
+The provider credential never reaches the caller: Authorino validates the
+caller's OpenShift token or MaaS API key, strips the Authorization header, and
+the mesh injects the provider key from the referenced Secret.
+*/}}
+{{- $root := . -}}
+{{- range $m := (include "maas-models.enabledModels" $root | fromJsonArray) }}
+{{- if eq ($m.backend | default "LLMInferenceService") "ExternalModel" }}
+{{- $ext := $m.external | default dict }}
+{{- $cred := $ext.credentials | default dict }}
+{{- $ns := include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+{{- $secretName := $cred.secretName | default (printf "%s-credentials" $m.name) }}
+{{/*
+`default` treats false as empty, so `$ext.tls | default true` would silently
+force TLS back on. Probe for the key instead.
+*/}}
+{{- $tls := "true" }}
+{{- if hasKey $ext "tls" }}{{- $tls = ($ext.tls | toString) }}{{- end }}
+
+{{- if $cred.create }}
+---
+{{/*
+Only for sandbox/demo. In production reference a Secret produced by the
+External Secrets Operator or Sealed Secrets and set validation.forbidInlineSecrets=true.
+*/}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict "root" $root "model" $m "component" "credentials" "wave" "secret") | nindent 2 }}
+type: Opaque
+stringData:
+  {{ $cred.key | default "api-key" }}: {{ $cred.apiKey | quote }}
+{{- end }}
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: {{ $m.name }}
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "model" $m
+        "component" "external-model"
+        "wave" "workload"
+        "annotations" (merge (dict)
+          ($ext.annotations | default dict)
+          (dict
+            "maas.opendatahub.io/tls" $tls
+            "maas.opendatahub.io/port" (($ext.port | default 443) | toString))
+          (dict
+            "openshift.io/display-name" (($m.catalog | default dict).displayName | default $m.name)
+            "openshift.io/description" (($m.catalog | default dict).description | default "")))
+        "extraLabels" ($m.labels | default dict)) | nindent 2 }}
+spec:
+  provider: {{ $ext.provider }}
+  endpoint: {{ $ext.endpoint }}
+  targetModel: {{ $ext.targetModel }}
+  credentialRef:
+    name: {{ $secretName }}
+{{- end }}
+{{- end }}

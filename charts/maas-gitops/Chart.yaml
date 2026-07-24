@@ -1,0 +1,27 @@
+apiVersion: v2
+name: maas-gitops
+description: Argo CD wiring for MaaS model management — AppProject, Applications and custom health checks for the MaaS CRDs
+type: application
+version: 1.0.0
+appVersion: "3.4"
+kubeVersion: ">=1.32.0-0"
+
+keywords:
+  - openshift
+  - openshift-gitops
+  - argocd
+  - models-as-a-service
+  - maas
+
+home: https://github.com/pase52/helm-maas
+sources:
+  - https://github.com/pase52/helm-maas
+
+maintainers:
+  - name: Platform Engineering
+
+annotations:
+  charts.openshift.io/name: MaaS GitOps
+  charts.openshift.io/provider: Platform Engineering
+  charts.openshift.io/supportURL: https://github.com/pase52/helm-maas/issues
+  charts.openshift.io/providerType: community

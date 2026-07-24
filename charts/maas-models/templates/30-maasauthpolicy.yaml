@@ -1,0 +1,52 @@
+{{/*
+MaaSAuthPolicy — who may call which models.
+
+maas-controller expands each of these into per-model Kuadrant AuthPolicies
+attached to the model's HTTPRoute. Subjects are OR-ed: any matching group or
+user grants access.
+
+Must live in the tenant namespace (default tenant: models-as-a-service),
+while the models it references live in the workload namespace — hence the
+explicit {name, namespace} pairs in modelRefs.
+*/}}
+{{- $root := . -}}
+{{- range $p := .Values.accessPolicies }}
+{{- if ne $p.enabled false }}
+{{- $models := (include "maas-models.selectModels" (dict "root" $root "selector" $p.modelSelector) | fromJsonArray) }}
+{{- $subjects := $p.subjects | default dict }}
+{{- $ann := dict }}
+{{- $_ := set $ann "openshift.io/display-name" ($p.displayName | default $p.name) }}
+{{- with $p.description }}{{- $_ := set $ann "openshift.io/description" . }}{{- end }}
+{{- $_ := set $ann "maas.pase52.io/managed-models" (include "maas-models.modelNames" $models) }}
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: {{ $p.name }}
+  namespace: {{ $root.Values.global.tenantNamespace }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "component" "auth-policy"
+        "wave" "governance"
+        "annotations" (merge $ann ($p.annotations | default dict))
+        "extraLabels" (merge (dict "maas.pase52.io/policy" $p.name) ($p.labels | default dict))) | nindent 2 }}
+spec:
+  modelRefs:
+    {{- include "maas-models.modelRefList" (dict "root" $root "models" $models) | nindent 4 }}
+  subjects:
+    {{- include "maas-models.subjectBlock" (dict "groups" $subjects.groups "users" $subjects.users) | nindent 4 }}
+  {{- with $p.meteringMetadata }}
+  meteringMetadata:
+    {{- with .organizationId }}
+    organizationId: {{ . | quote }}
+    {{- end }}
+    {{- with .costCenter }}
+    costCenter: {{ . | quote }}
+    {{- end }}
+    {{- with .labels }}
+    labels:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

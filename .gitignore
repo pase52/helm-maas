@@ -1,0 +1,12 @@
+# Helm
+*.tgz
+charts/*/charts/
+charts/*/Chart.lock
+
+# Test harness build output
+tests/lua/luatest
+tests/lua/go.sum
+
+# Local scratch
+/tmp/
+*.local.yaml

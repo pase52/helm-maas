@@ -1,0 +1,308 @@
+# =============================================================================
+# maas-models — default values
+# =============================================================================
+# This chart manages the *models* published through Models-as-a-Service (MaaS)
+# on Red Hat OpenShift AI. It does NOT install the MaaS platform itself
+# (maas-api, maas-controller, Gateway, Kuadrant/RHCL) — that is a cluster-admin
+# day-1 task. See docs/ARCHITECTURE.md.
+#
+# For every entry in `models` the chart renders, in Argo CD sync-wave order:
+#   1. LLMInferenceService (KServe)  or  ExternalModel (+ optional Secret)
+#   2. MaaSModelRef        — publishes the model into the MaaS catalog
+#   3. MaaSAuthPolicy      — who may call it        (from `accessPolicies`)
+#   4. MaaSSubscription    — how many tokens        (from `subscriptions`)
+#
+# One values file per environment. See environments/sandbox and environments/prod.
+# =============================================================================
+
+# -- Environment name. Surfaced as the `maas.pase52.io/environment` label on every
+# rendered object and used in the inventory ConfigMap. Keep it short: sandbox, prod.
+environment: sandbox
+
+# -----------------------------------------------------------------------------
+# global — cluster-wide coordinates of the MaaS platform.
+# These rarely change per environment; they change per *cluster*.
+# -----------------------------------------------------------------------------
+global:
+  # -- Namespace holding the MaaS tenant objects (MaaSAuthPolicy, MaaSSubscription).
+  # Default tenant is `models-as-a-service`; additional AITenants use `ai-tenant-<id>`.
+  tenantNamespace: models-as-a-service
+
+  # -- Default namespace the model workloads (LLMInferenceService / ExternalModel /
+  # MaaSModelRef) are deployed into. Overridable per model.
+  modelNamespace: llm
+
+  # -- The MaaS-enabled Gateway API Gateway. Traffic must flow through it for
+  # Authorino (authn/authz) and Limitador (token rate limiting) to apply.
+  gateway:
+    name: maas-default-gateway
+    namespace: openshift-ingress
+
+  # -- Image pull secrets added to every model namespace reference.
+  # Required for registry.redhat.io content (ModelCar images, RHAIIS vLLM runtimes).
+  imagePullSecrets: []
+  # - name: redhat-registry
+
+  # -- Optional registry mirror prefix for disconnected / air-gapped clusters.
+  # When set, any model image or `oci://` model URI starting with a known Red Hat
+  # registry is rewritten to this prefix. Example: "mirror.corp.example.com/rh"
+  registryMirror: ""
+
+# -----------------------------------------------------------------------------
+# namespaces — optional namespace management.
+# Leave `create: false` when namespaces are provisioned by a higher-level
+# cluster-config repo (the usual arrangement on a governed OpenShift cluster).
+# -----------------------------------------------------------------------------
+namespaces:
+  # -- Create the namespaces referenced by models. Requires the Argo CD
+  # service account to have cluster-scoped namespace create permission.
+  create: false
+  # -- Labels applied to created namespaces.
+  labels: {}
+  # -- Annotations applied to created namespaces.
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# argocd — how the rendered resources behave inside Argo CD.
+# NOTE: this section tunes *annotations on the rendered resources*.
+# The Argo CD Application/AppProject objects themselves live in the
+# `maas-gitops` chart.
+# -----------------------------------------------------------------------------
+argocd:
+  # -- Emit Argo CD sync-wave annotations so resources converge in dependency order.
+  enabled: true
+
+  # -- Sync waves. Lower numbers apply first; Argo CD waits for every resource in
+  # a wave to report Healthy before starting the next one.
+  #
+  # WHY modelRef AND governance SHARE WAVE 10 — do not "fix" this by splitting them:
+  #   MaaSModelRef only reaches phase=Ready once a MaaSAuthPolicy + MaaSSubscription
+  #   pair covers it (GovernanceAttached), and those two only reach phase=Active
+  #   once the MaaSModelRef they reference exists. The dependency is circular.
+  #   Put them in different waves and Argo CD deadlocks: the earlier wave never
+  #   goes Healthy, so the later wave is never applied.
+  #   They are applied together and converge together.
+  syncWaves:
+    namespace: "-10"
+    secret: "-5"
+    # LLMInferenceService / ExternalModel
+    workload: "0"
+    # MaaSModelRef — must equal `governance` below
+    modelRef: "10"
+    # MaaSAuthPolicy + MaaSSubscription — must equal `modelRef` above
+    governance: "10"
+    # PrometheusRule, inventory ConfigMap, kube-state-metrics config
+    observability: "20"
+
+  # -- Extra `argocd.argoproj.io/sync-options` applied to every rendered resource.
+  # Example: ["ServerSideApply=true"] for large LLMInferenceService specs.
+  syncOptions: []
+
+  # -- Add `argocd.argoproj.io/compare-options` to rendered resources.
+  # Example: "IgnoreExtraneous"
+  compareOptions: ""
+
+# -----------------------------------------------------------------------------
+# modelDefaults — inherited by every entry in `models` unless overridden there.
+# This is what keeps a 30-model values file readable.
+# -----------------------------------------------------------------------------
+modelDefaults:
+  # -- Default number of replicas per model.
+  replicas: 1
+
+  # -- Default resource requests/limits for the inference container.
+  # Always set limits on a shared OpenShift cluster.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 8Gi
+    limits:
+      cpu: "2"
+      memory: 16Gi
+
+  # -- Default node placement. GPU models normally override this.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # -- Default environment variables for the vLLM runtime.
+  env: []
+
+  # -- Default probes. LLM cold starts are slow — the generous
+  # initialDelaySeconds/failureThreshold below reflect real model load times.
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+      scheme: HTTPS
+    initialDelaySeconds: 300
+    periodSeconds: 15
+    timeoutSeconds: 15
+    failureThreshold: 30
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+      scheme: HTTPS
+    initialDelaySeconds: 300
+    periodSeconds: 30
+    timeoutSeconds: 30
+    failureThreshold: 5
+
+  # -- Pod-level security context. Deliberately does NOT set runAsUser:
+  # OpenShift's restricted-v2 SCC assigns a UID from the namespace range.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Container-level security context, restricted-v2 compatible.
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+# -----------------------------------------------------------------------------
+# models — the catalog. One entry per published model.
+# -----------------------------------------------------------------------------
+# Common fields:
+#   name          (required) DNS-1123 name. Used for the LLMInferenceService,
+#                            the MaaSModelRef, and as the selector key.
+#   enabled       (default true) set false to withdraw a model without deleting
+#                            the block — keeps the audit trail in git.
+#   backend       LLMInferenceService | ExternalModel
+#   tier          free|premium|enterprise|<anything>. Used by accessPolicies and
+#                 subscriptions via `modelSelector.tiers`.
+#   namespace     overrides global.modelNamespace
+#   tenantRef     AITenant name for multi-tenant clusters (omit for default tenant)
+#   catalog       metadata surfaced by GET /v1/models
+#
+# See environments/*/values.yaml for worked examples.
+models: []
+# - name: granite-3-1-8b
+#   enabled: true
+#   backend: LLMInferenceService
+#   tier: premium
+#   catalog:
+#     displayName: "Granite 3.1 8B Instruct"
+#     description: "IBM Granite 3.1 8B, instruction tuned"
+#     genaiUseCase: chat
+#     contextWindow: 4096
+#     capabilities: ["text-generation", "chat"]
+#   inference:
+#     modelUri: oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-starter-v1:1.4
+#     modelName: ibm-granite/granite-3.1-8b-instruct
+#     image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+#     replicas: 2
+
+# -----------------------------------------------------------------------------
+# accessPolicies — MaaSAuthPolicy objects. *Who* may call *which* models.
+# Rendered into global.tenantNamespace.
+#
+# Without a matching access policy a model is deployed but every request is
+# denied, and its MaaSModelRef stays phase=Pending (GovernanceAttached=False).
+# -----------------------------------------------------------------------------
+accessPolicies: []
+# - name: premium-access
+#   enabled: true
+#   displayName: "Premium access"
+#   description: "Grants the premium-users group access to premium models"
+#   modelSelector:
+#     all: false          # match every enabled model
+#     tiers: [premium]    # match models whose `tier` is in this list
+#     names: []           # match models by explicit name
+#   subjects:
+#     groups: ["premium-users"]
+#     users: []
+#   meteringMetadata:
+#     organizationId: "acme"
+#     costCenter: "cc-1234"
+#     labels: {}
+
+# -----------------------------------------------------------------------------
+# subscriptions — MaaSSubscription objects. *How many tokens* per group/user.
+# Rendered into global.tenantNamespace. Enforced by Limitador.
+#
+# `window` accepts s/m/h only (1–9999), e.g. 1m, 1h, 24h. Days are NOT accepted.
+# -----------------------------------------------------------------------------
+subscriptions: []
+# - name: premium-plan
+#   enabled: true
+#   displayName: "Premium plan"
+#   description: "1M tokens/hour for the premium-users group"
+#   priority: 20            # highest priority wins when a user has several plans
+#   owner:
+#     groups: ["premium-users"]
+#     users: []
+#   modelSelector:
+#     tiers: [premium]
+#   tokenRateLimits:
+#     - limit: 1000000
+#       window: 1h
+#   # Per-model overrides, keyed by model name. Merged over tokenRateLimits above.
+#   perModel: {}
+#   #  granite-3-1-8b:
+#   #    tokenRateLimits:
+#   #      - limit: 2000000
+#   #        window: 1h
+#   #    billingRate:
+#   #      inputTokenCost: "0.0001"
+#   #      outputTokenCost: "0.0003"
+
+# -----------------------------------------------------------------------------
+# observability — the "is it healthy?" surface for the DevOps team.
+# -----------------------------------------------------------------------------
+observability:
+  # -- Render a ConfigMap inventorying every managed model, its tier, backend,
+  # namespace and governance. Cheap, greppable source of truth for audits and
+  # for answering "what is supposed to be deployed in this env?".
+  inventory:
+    enabled: true
+
+  # -- kube-state-metrics CustomResourceState config, exposing MaaS CRD phases
+  # as Prometheus metrics (maas_model_phase, maas_authpolicy_phase, ...).
+  # Renders a ConfigMap only. A cluster admin must mount it into a
+  # kube-state-metrics instance — see docs/HEALTH.md.
+  customResourceStateMetrics:
+    enabled: false
+    # -- Namespace for the ConfigMap. Defaults to global.tenantNamespace.
+    # Set this to the namespace of the kube-state-metrics instance that consumes it.
+    namespace: ""
+
+  # -- PrometheusRule alerting on models that are not Ready.
+  # Requires user-workload monitoring enabled on the cluster.
+  prometheusRule:
+    enabled: false
+    # -- Namespace for the PrometheusRule. Defaults to global.tenantNamespace.
+    namespace: ""
+    # -- Labels added to the PrometheusRule (e.g. for Alertmanager routing).
+    labels: {}
+    # -- How long a model may stay not-Ready before firing.
+    readinessGracePeriod: 30m
+    # -- Severity label on the generated alerts.
+    severity: warning
+    # -- Extra labels on every generated alert (e.g. team, escalation policy).
+    alertLabels: {}
+    # -- Extra annotations on every generated alert.
+    alertAnnotations: {}
+
+# -----------------------------------------------------------------------------
+# commonLabels / commonAnnotations — applied to every rendered resource.
+# -----------------------------------------------------------------------------
+commonLabels: {}
+commonAnnotations: {}
+
+# -----------------------------------------------------------------------------
+# validation — fail-fast guardrails evaluated at template time.
+# Turning these off is not recommended: Argo CD reports a clean sync for a
+# misconfigured model that will never become healthy.
+# -----------------------------------------------------------------------------
+validation:
+  # -- Fail rendering when a model has no MaaSAuthPolicy covering it.
+  requireAccessPolicy: true
+  # -- Fail rendering when a model has no MaaSSubscription covering it.
+  requireSubscription: true
+  # -- Fail rendering when an ExternalModel references a plaintext apiKey.
+  # Keep true for prod: secrets belong in a sealed/external secret store.
+  forbidInlineSecrets: false

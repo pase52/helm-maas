@@ -1,0 +1,243 @@
+# =============================================================================
+# PRODUCTION environment
+# =============================================================================
+# Purpose: serve business workloads under explicit, auditable entitlements.
+# Posture: no wildcard access — every model is granted to a named group.
+#          Tiered quotas. GPU-backed models. No inline secrets.
+#          Alerting enabled.
+#
+# Change control: every edit here is a production access or capacity change.
+# Argo CD auto-sync is OFF for this environment (see environments/prod/application.yaml)
+# so a human presses Sync after review.
+# =============================================================================
+
+environment: prod
+
+global:
+  tenantNamespace: models-as-a-service
+  modelNamespace: llm-prod
+  gateway:
+    name: maas-default-gateway
+    namespace: openshift-ingress
+  imagePullSecrets:
+    - name: redhat-registry
+  # Set for disconnected clusters, e.g. "mirror.corp.example.com/rh"
+  registryMirror: ""
+
+namespaces:
+  # Production namespaces are provisioned by the cluster-config repo, not here.
+  create: false
+
+argocd:
+  enabled: true
+  syncOptions:
+    - ServerSideApply=true
+
+modelDefaults:
+  replicas: 2
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+    limits:
+      cpu: "8"
+      memory: 64Gi
+  # Production inference runs on the GPU node pool.
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+models:
+  - name: granite-3-1-8b
+    enabled: true
+    backend: LLMInferenceService
+    tier: standard
+    catalog:
+      displayName: "Granite 3.1 8B Instruct"
+      description: "General purpose chat and summarisation. Default model for internal applications."
+      genaiUseCase: chat
+      contextWindow: 4096
+      capabilities: ["text-generation", "chat"]
+    inference:
+      modelUri: oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-starter-v1:1.4
+      modelName: ibm-granite/granite-3.1-8b-instruct
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+      replicas: 3
+      env:
+        - name: VLLM_ADDITIONAL_ARGS
+          value: "--max-model-len 4096 --dtype float16"
+      resources:
+        requests:
+          cpu: "4"
+          memory: 24Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: 32Gi
+          nvidia.com/gpu: "1"
+
+  - name: granite-3-1-8b-code
+    enabled: true
+    backend: LLMInferenceService
+    tier: premium
+    catalog:
+      displayName: "Granite 3.1 8B Code"
+      description: "Code generation and review. Restricted to the engineering organisation."
+      genaiUseCase: code
+      contextWindow: 8192
+      capabilities: ["text-generation", "code"]
+    inference:
+      modelUri: oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-starter-v1:1.4
+      modelName: ibm-granite/granite-3.1-8b-code
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+      replicas: 2
+      env:
+        - name: VLLM_ADDITIONAL_ARGS
+          value: "--max-model-len 8192 --dtype float16"
+      resources:
+        requests:
+          cpu: "4"
+          memory: 24Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: 32Gi
+          nvidia.com/gpu: "1"
+
+  # External frontier model for the teams that have signed off on data egress.
+  - name: claude-sonnet
+    enabled: false
+    backend: ExternalModel
+    tier: premium
+    catalog:
+      displayName: "Claude Sonnet 4.5"
+      description: "External Anthropic model. Data leaves the cluster — approved use cases only."
+      genaiUseCase: chat
+      contextWindow: 200000
+      capabilities: ["text-generation", "chat"]
+    external:
+      provider: anthropic
+      endpoint: api.anthropic.com
+      targetModel: claude-sonnet-4-5-20241022
+      tls: true
+      port: 443
+      credentials:
+        # Managed by External Secrets Operator. Never inline in prod.
+        secretName: anthropic-credentials
+
+# -----------------------------------------------------------------------------
+# Access — explicit entitlements only. No `all: true` in production.
+# -----------------------------------------------------------------------------
+accessPolicies:
+  - name: standard-access
+    enabled: true
+    displayName: "Standard model access"
+    description: "Grants the maas-users group access to standard-tier models."
+    modelSelector:
+      tiers: ["standard"]
+    subjects:
+      groups:
+        - "maas-users"
+    meteringMetadata:
+      organizationId: "corp"
+      costCenter: "cc-ai-platform"
+      labels:
+        environment: prod
+        tier: standard
+
+  - name: premium-access
+    enabled: true
+    displayName: "Premium model access"
+    description: "Grants the maas-premium group access to premium-tier models (code and external)."
+    modelSelector:
+      tiers: ["premium"]
+    subjects:
+      groups:
+        - "maas-premium"
+    meteringMetadata:
+      organizationId: "corp"
+      costCenter: "cc-ai-premium"
+      labels:
+        environment: prod
+        tier: premium
+
+# -----------------------------------------------------------------------------
+# Quotas
+# -----------------------------------------------------------------------------
+subscriptions:
+  - name: standard-plan
+    enabled: true
+    displayName: "Standard plan"
+    description: "500k tokens/hour per model for the maas-users group."
+    priority: 10
+    owner:
+      groups:
+        - "maas-users"
+    modelSelector:
+      tiers: ["standard"]
+    tokenRateLimits:
+      - limit: 500000
+        window: 1h
+      - limit: 20000
+        window: 1m
+
+  - name: premium-plan
+    enabled: true
+    displayName: "Premium plan"
+    description: "2M tokens/hour for the maas-premium group, with a tighter cap on the external model."
+    # Higher priority wins when a user is in both maas-users and maas-premium.
+    priority: 20
+    owner:
+      groups:
+        - "maas-premium"
+    modelSelector:
+      tiers: ["premium"]
+    tokenRateLimits:
+      - limit: 2000000
+        window: 1h
+      - limit: 60000
+        window: 1m
+    perModel:
+      # External tokens are billed by the provider — cap them harder than
+      # on-cluster capacity, which is already paid for.
+      claude-sonnet:
+        tokenRateLimits:
+          - limit: 200000
+            window: 1h
+          - limit: 10000
+            window: 1m
+
+# -----------------------------------------------------------------------------
+# Observability — production pages someone.
+# -----------------------------------------------------------------------------
+observability:
+  inventory:
+    enabled: true
+  customResourceStateMetrics:
+    enabled: true
+    # Namespace of the kube-state-metrics instance that mounts this config.
+    namespace: openshift-user-workload-monitoring
+  prometheusRule:
+    enabled: true
+    namespace: models-as-a-service
+    labels:
+      openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus
+    readinessGracePeriod: 30m
+    severity: warning
+    alertLabels:
+      team: ai-platform
+      environment: prod
+
+# -----------------------------------------------------------------------------
+# Guardrails — all on. A bad values.yaml must fail render, not fail silently.
+# -----------------------------------------------------------------------------
+validation:
+  requireAccessPolicy: true
+  requireSubscription: true
+  forbidInlineSecrets: true
