@@ -23,6 +23,13 @@ Requires user-workload monitoring: `oc -n openshift-monitoring get cm cluster-mo
 {{- $for := $pr.readinessGracePeriod | default "30m" -}}
 {{- $sev := $pr.severity | default "warning" -}}
 {{- $env := .Values.environment -}}
+{{/*
+Alert labels are built as a dict and rendered once. Emitting `environment:` and
+then splatting alertLabels underneath duplicates the key whenever an operator
+also sets `environment` there — which prod does. A duplicate key renders fine and
+is rejected at apply time.
+*/}}
+{{- $baseLabels := merge (dict "environment" ($env | toString)) (deepCopy ($pr.alertLabels | default dict)) -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -39,9 +46,7 @@ spec:
             max by (namespace, name) (maas_model_phase{phase="Ready"}) == 0
           for: {{ $for }}
           labels:
-            severity: {{ $sev }}
-            environment: {{ $env | quote }}
-            {{- with $pr.alertLabels }}{{ toYaml . | nindent 12 }}{{- end }}
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
           annotations:
             summary: "MaaS model {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is not Ready"
             description: >-
@@ -57,9 +62,7 @@ spec:
             max by (namespace, name) (maas_model_phase{phase="Unhealthy"}) == 1
           for: 10m
           labels:
-            severity: critical
-            environment: {{ $env | quote }}
-            {{- with $pr.alertLabels }}{{ toYaml . | nindent 12 }}{{- end }}
+            {{- toYaml (merge (dict "severity" "critical") $baseLabels) | nindent 12 }}
           annotations:
             summary: "MaaS model {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is Unhealthy"
             description: >-
@@ -75,9 +78,7 @@ spec:
             max by (namespace, name) (maas_subscription_phase{phase=~"Degraded|Failed|Invalid"}) == 1
           for: 15m
           labels:
-            severity: {{ $sev }}
-            environment: {{ $env | quote }}
-            {{- with $pr.alertLabels }}{{ toYaml . | nindent 12 }}{{- end }}
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
           annotations:
             summary: "MaaS governance object {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is degraded"
             description: >-
@@ -95,9 +96,7 @@ spec:
             ) > 0
           for: {{ $for }}
           labels:
-            severity: {{ $sev }}
-            environment: {{ $env | quote }}
-            {{- with $pr.alertLabels }}{{ toYaml . | nindent 12 }}{{- end }}
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
           annotations:
             summary: "Model workload {{ `{{ $labels.namespace }}/{{ $labels.deployment }}` }} has unavailable replicas"
             description: >-

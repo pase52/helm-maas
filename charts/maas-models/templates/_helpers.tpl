@@ -18,76 +18,93 @@ Follows the Kubernetes recommended label set plus a MaaS-specific environment
 label so the DevOps team can slice by environment across namespaces:
     oc get maasmodelref -A -l maas.pase52.io/environment=prod
 */}}
+{{/*
+Everything below builds dicts and `toYaml`s them, rather than emitting YAML line
+by line. Concatenating YAML fragments lets the same key be written twice — the
+API server rejects that, but `yq` and `helm template` both accept it silently, so
+the failure surfaces only at apply time. Merging dicts makes it impossible.
+*/}}
+{{- define "maas-models.labelsDict" -}}
+{{- $l := dict
+      "helm.sh/chart" (include "maas-models.chart" .)
+      "app.kubernetes.io/name" (include "maas-models.name" .)
+      "app.kubernetes.io/instance" .Release.Name
+      "app.kubernetes.io/version" (.Chart.AppVersion | toString)
+      "app.kubernetes.io/managed-by" .Release.Service
+      "app.kubernetes.io/part-of" "models-as-a-service"
+      "maas.pase52.io/environment" (.Values.environment | toString)
+-}}
+{{- merge $l (.Values.commonLabels | default dict) | toJson -}}
+{{- end -}}
+
 {{- define "maas-models.labels" -}}
-helm.sh/chart: {{ include "maas-models.chart" . }}
-app.kubernetes.io/name: {{ include "maas-models.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/part-of: models-as-a-service
-maas.pase52.io/environment: {{ .Values.environment | quote }}
-{{- with .Values.commonLabels }}
-{{ toYaml . }}
-{{- end }}
+{{- include "maas-models.labelsDict" . | fromJson | toYaml -}}
 {{- end -}}
 
 {{/*
 Per-model labels. Adds the model identity and tier so a single label selector
 answers "show me everything that makes up model X".
-Usage: include "maas-models.modelLabels" (dict "root" $ "model" $m "component" "modelref")
 */}}
-{{- define "maas-models.modelLabels" -}}
-{{ include "maas-models.labels" .root }}
-app.kubernetes.io/component: {{ .component }}
-maas.pase52.io/model: {{ .model.name | quote }}
-maas.pase52.io/tier: {{ .model.tier | default "default" | quote }}
-maas.pase52.io/backend: {{ .model.backend | default "LLMInferenceService" | quote }}
+{{- define "maas-models.modelLabelsDict" -}}
+{{- $l := include "maas-models.labelsDict" .root | fromJson -}}
+{{- $_ := set $l "app.kubernetes.io/component" .component -}}
+{{- $_ := set $l "maas.pase52.io/model" (.model.name | toString) -}}
+{{- $_ := set $l "maas.pase52.io/tier" (.model.tier | default "default" | toString) -}}
+{{- $_ := set $l "maas.pase52.io/backend" (.model.backend | default "LLMInferenceService" | toString) -}}
+{{- $l | toJson -}}
 {{- end -}}
 
 {{/*
 =============================================================================
 Argo CD annotations
 =============================================================================
-Renders sync-wave / sync-options / compare-options for a given wave key.
-Usage: include "maas-models.argoAnnotations" (dict "root" $ "wave" "modelRef")
+`syncOptions` lets a caller add resource-specific options (e.g. Prune=false on a
+PVC) that are merged into the single sync-options annotation rather than
+emitting a second one.
+Usage: include "maas-models.argoAnnotationsDict" (dict "root" $ "wave" "modelRef" "syncOptions" (list "Prune=false"))
 */}}
-{{- define "maas-models.argoAnnotations" -}}
+{{- define "maas-models.argoAnnotationsDict" -}}
 {{- $root := .root -}}
 {{- $argo := $root.Values.argocd | default dict -}}
+{{- $ann := dict -}}
 {{- if $argo.enabled -}}
-argocd.argoproj.io/sync-wave: {{ get ($argo.syncWaves | default dict) .wave | default "0" | quote }}
-{{- with $argo.syncOptions }}
-argocd.argoproj.io/sync-options: {{ join "," . | quote }}
-{{- end }}
-{{- with $argo.compareOptions }}
-argocd.argoproj.io/compare-options: {{ . | quote }}
-{{- end }}
+{{- $_ := set $ann "argocd.argoproj.io/sync-wave" (get ($argo.syncWaves | default dict) .wave | default "0" | toString) -}}
+{{- $opts := concat ($argo.syncOptions | default list) (.syncOptions | default list) | uniq -}}
+{{- if $opts -}}
+{{- $_ := set $ann "argocd.argoproj.io/sync-options" (join "," $opts) -}}
 {{- end -}}
+{{- with $argo.compareOptions -}}
+{{- $_ := set $ann "argocd.argoproj.io/compare-options" . -}}
+{{- end -}}
+{{- else -}}
+{{/* Sync waves off, but a resource-specific option still has to be honoured. */}}
+{{- with .syncOptions -}}
+{{- $_ := set $ann "argocd.argoproj.io/sync-options" (join "," (. | uniq)) -}}
+{{- end -}}
+{{- end -}}
+{{- $ann | toJson -}}
 {{- end -}}
 
 {{/*
 Common metadata block: labels + argo annotations + user annotations.
-Usage: include "maas-models.metadata" (dict "root" $ "model" $m "component" "x" "wave" "workload" "annotations" $extra)
+Later sources win on conflict, so a caller can deliberately override a default.
+Usage: include "maas-models.metadata" (dict "root" $ "model" $m "component" "x" "wave" "workload" "annotations" $extra "syncOptions" (list "Prune=false"))
 */}}
 {{- define "maas-models.metadata" -}}
+{{- $labels := dict -}}
+{{- if .model -}}
+{{- $labels = include "maas-models.modelLabelsDict" (dict "root" .root "model" .model "component" .component) | fromJson -}}
+{{- else -}}
+{{- $labels = include "maas-models.labelsDict" .root | fromJson -}}
+{{- $_ := set $labels "app.kubernetes.io/component" .component -}}
+{{- end -}}
+{{- $labels = merge (deepCopy (.extraLabels | default dict)) $labels -}}
+{{- $ann := include "maas-models.argoAnnotationsDict" (dict "root" .root "wave" .wave "syncOptions" .syncOptions) | fromJson -}}
+{{- $ann = mergeOverwrite $ann (deepCopy (.root.Values.commonAnnotations | default dict)) (deepCopy (.annotations | default dict)) -}}
 labels:
-  {{- if .model }}
-  {{- include "maas-models.modelLabels" (dict "root" .root "model" .model "component" .component) | nindent 2 }}
-  {{- else }}
-  {{- include "maas-models.labels" .root | nindent 2 }}
-  app.kubernetes.io/component: {{ .component }}
-  {{- end }}
-  {{- with .extraLabels }}
-  {{- toYaml . | nindent 2 }}
-  {{- end }}
+  {{- toYaml $labels | nindent 2 }}
 annotations:
-  {{- include "maas-models.argoAnnotations" (dict "root" .root "wave" .wave) | nindent 2 }}
-  {{- with .root.Values.commonAnnotations }}
-  {{- toYaml . | nindent 2 }}
-  {{- end }}
-  {{- with .annotations }}
-  {{- toYaml . | nindent 2 }}
-  {{- end }}
+  {{- toYaml $ann | nindent 2 }}
 {{- end -}}
 
 {{/*

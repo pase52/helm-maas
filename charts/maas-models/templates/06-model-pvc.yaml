@@ -17,14 +17,20 @@ would mean several storage-initializers writing the same paths concurrently.
 {{- if and $p.enabled (not $p.existingClaim) }}
 {{- $ns := include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
 {{- $ann := dict }}
+{{- $syncOptions := list }}
 {{- if ne $p.retain false }}
 {{/*
 Retaining is the default: re-provisioning and re-downloading a large model is
-expensive, and losing a bound claim to an accidental prune is worse. Both
-annotations are needed — one for `helm uninstall`, one for Argo CD.
+expensive, and losing a bound claim to an accidental prune is worse. Two
+mechanisms are needed — one for `helm uninstall`, one for Argo CD.
+
+Prune=false goes through `syncOptions` so it merges into the single
+sync-options annotation. Setting the annotation directly here would emit a
+second copy of a key the metadata helper already writes, and a duplicate key is
+rejected by the API server while rendering perfectly cleanly.
 */}}
 {{- $_ := set $ann "helm.sh/resource-policy" "keep" }}
-{{- $_ := set $ann "argocd.argoproj.io/sync-options" "Prune=false" }}
+{{- $syncOptions = append $syncOptions "Prune=false" }}
 {{- end }}
 {{- $ann = merge $ann ($p.annotations | default dict) }}
 ---
@@ -39,6 +45,7 @@ metadata:
         "component" "model-storage"
         "wave" "secret"
         "annotations" $ann
+        "syncOptions" $syncOptions
         "extraLabels" ($p.labels | default dict)) | nindent 2 }}
 spec:
   accessModes:

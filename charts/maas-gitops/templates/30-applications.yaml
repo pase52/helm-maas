@@ -31,7 +31,12 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
   {{- end }}
 spec:
-  project: {{ $root.Values.appProject.name }}
+  {{/*
+  Defaults to the AppProject this chart renders, but stays overridable: with
+  `appProject.enabled: false` the project is managed elsewhere, and an
+  Application naming a project that does not exist is rejected outright.
+  */}}
+  project: {{ $c.project | default $root.Values.appProject.name }}
 
   source:
     repoURL: {{ $c.repoURL }}

@@ -57,6 +57,60 @@ for env_dir in "${ROOT}"/environments/*/; do
     bad "${env}: YAML parse" "$(yq '.' "${out}" 2>&1 | head -3)"
   fi
 
+  # --- duplicate mapping keys.
+  # yq and helm template both accept these silently, keeping the last value; the
+  # API server rejects them outright. That combination means a duplicate key
+  # passes every local check and fails only at apply time, so it needs its own
+  # test. Both real occurrences came from concatenating YAML fragments that each
+  # wrote the same annotation or label.
+  if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+    dup="$(python3 - "${out}" <<'PY'
+import sys, yaml
+
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+def no_duplicates(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r} at line {key_node.start_mark.line + 1}",
+                key_node.start_mark)
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, no_duplicates)
+
+problems = []
+with open(sys.argv[1]) as fh:
+    for doc in fh.read().split("\n---\n"):
+        if not doc.strip():
+            continue
+        try:
+            yaml.load(doc, Loader=StrictLoader)
+        except yaml.YAMLError as exc:
+            name = "?"
+            for line in doc.splitlines():
+                if line.startswith("  name:"):
+                    name = line.split(":", 1)[1].strip()
+                    break
+            problems.append(f"{name}: {exc}")
+for p in problems:
+    print(p)
+PY
+)"
+    if [[ -z "${dup}" ]]; then
+      ok "${env}: no duplicate mapping keys"
+    else
+      bad "${env}: duplicate mapping keys (the API server rejects these)" "${dup}"
+    fi
+  else
+    printf 'note  %s: skipping duplicate-key check (python3 with PyYAML not available)\n' "${env}"
+  fi
+
   # --- every MaaSModelRef points at a workload that this render also creates.
   # A dangling reference reconciles to phase=Pending forever.
   refs="$(yq -r 'select(.kind=="MaaSModelRef") | .spec.modelRef.kind + "/" + .metadata.namespace + "/" + .spec.modelRef.name' "${out}" | sort -u)"
@@ -166,12 +220,18 @@ for env_dir in "${ROOT}"/environments/*/; do
     fi
   done < <(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.template.volumes != null) | .metadata.name + "\t" + .metadata.namespace + "\t" + ([.spec.template.volumes[] | select(.name=="kserve-provision-location") | .persistentVolumeClaim.claimName] | .[0] // "null")' "${out}")
 
-  # Any volume this chart declares for model weights must carry that exact name.
-  wrongname="$(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.template.volumes != null) | select([.spec.template.volumes[] | select(.name=="kserve-provision-location")] | length == 0) | .metadata.name' "${out}" | grep -v '^$' || true)"
+  # A PVC-backed volume intended for model weights must carry KServe's reserved
+  # name. Scoped to PVC volumes specifically: a model may legitimately add
+  # unrelated volumes through inference.extraSpec (a CA bundle, a config file),
+  # and those must not trip this check.
+  wrongname="$(yq -r 'select(.kind=="LLMInferenceService")
+      | select([.spec.template.volumes // [] | .[] | select(.persistentVolumeClaim != null)] | length > 0)
+      | select([.spec.template.volumes // [] | .[] | select(.persistentVolumeClaim != null and .name=="kserve-provision-location")] | length == 0)
+      | .metadata.name' "${out}" | grep -v '^$' || true)"
   if [[ -z "${wrongname}" ]]; then
-    ok "${env}: model weight volumes use KServe's reserved volume name"
+    ok "${env}: PVC-backed model volumes use KServe's reserved volume name"
   else
-    bad "${env}: pod volume not named kserve-provision-location" "${wrongname} — KServe would add its own emptyDir and the PVC would sit unused"
+    bad "${env}: model PVC not named kserve-provision-location" "${wrongname} — KServe would add its own emptyDir alongside and the PVC would sit unused"
   fi
 
   # A created PVC that Argo CD may prune takes the weights with it.

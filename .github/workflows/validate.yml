@@ -73,9 +73,12 @@ jobs:
           curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
             | sudo tar -xz -C /usr/local/bin kubeconform
 
-      # The MaaS and KServe CRDs are not in the upstream schema catalogue, so
-      # they are skipped here. Their shape is covered by values.schema.json and
-      # the render invariants; this job catches malformed core objects.
+      # CRDs from MaaS, KServe, Prometheus and External Secrets are not in the
+      # upstream schema catalogue, so they are skipped here. Their shape is
+      # covered by values.schema.json, the render invariants and the Lua suite;
+      # this job's job is the core objects — Secret, ServiceAccount, PVC,
+      # ConfigMap, Namespace — and it is what caught the duplicate annotation
+      # keys that `helm template` and `yq` both accepted.
       - name: Validate rendered manifests
         run: |
           for env in environments/*/; do
@@ -85,5 +88,5 @@ jobs:
               -f "$env/values.yaml" --kube-version 1.32.0 \
               | kubeconform -strict -summary \
                   -kubernetes-version 1.32.0 \
-                  -skip 'MaaSModelRef,MaaSAuthPolicy,MaaSSubscription,ExternalModel,LLMInferenceService,PrometheusRule'
+                  -skip 'MaaSModelRef,MaaSAuthPolicy,MaaSSubscription,ExternalModel,LLMInferenceService,PrometheusRule,SecretStore,ClusterSecretStore,ExternalSecret'
           done

@@ -134,6 +134,11 @@ applicationDefaults:
   # -- Argo CD namespace the Application object is created in.
   namespace: ""
 
+  # -- AppProject these Applications belong to. Defaults to `appProject.name`.
+  # Set explicitly when `appProject.enabled: false` and the project is managed
+  # elsewhere — an Application naming a project that does not exist is rejected.
+  project: ""
+
   # -- Git source.
   repoURL: https://github.com/pase52/helm-maas.git
   targetRevision: main
