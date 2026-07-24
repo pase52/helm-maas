@@ -324,6 +324,61 @@ modelDefaults:
     timeoutSeconds: 30
     failureThreshold: 5
 
+  # -- Where downloaded model weights land.
+  #
+  # Default (disabled): KServe mounts an emptyDir at /mnt/models, so the weights
+  # sit on the node's ephemeral storage. Simple, but the model competes with
+  # every other pod on that node for disk, and a large model can be evicted
+  # mid-download or not fit at all.
+  #
+  # Enabled: the chart creates a PVC per model and hands it to KServe in place of
+  # the emptyDir, so the weights land on your storage class instead.
+  #
+  # WHAT THIS DOES AND DOES NOT DO — the distinction matters:
+  #   ✔ Keeps weights off node ephemeral storage: no eviction risk, no
+  #     interference with co-scheduled pods.
+  #   ✔ Makes models larger than the node's disk possible at all.
+  #   ✘ Does NOT skip the download on restart. The storage-initializer writes
+  #     into the target directory unconditionally — there is no
+  #     skip-if-already-present for s3://. Every pod start re-downloads and
+  #     overwrites. A PVC changes *where* the bytes land, not whether they move.
+  #
+  # To genuinely download once and reuse: populate a PVC out of band (a Job, or
+  # one throwaway pod), then point `modelUri` at `pvc://<claim>/<path>`. KServe
+  # mounts it directly and runs no storage-initializer at all.
+  persistence:
+    enabled: false
+    # -- Use a PVC you already manage. Mutually exclusive with the sizing fields.
+    existingClaim: ""
+    # -- StorageClass. Empty uses the cluster default; "-" disables dynamic
+    # provisioning so the claim binds only to a matching pre-created PV.
+    storageClassName: ""
+    # -- Must exceed the on-disk model size with headroom; a claim that fills up
+    # fails the download partway through. Required when persistence is enabled
+    # and no existingClaim is given.
+    #
+    # Deliberately empty rather than a round number: model sizes vary by an order
+    # of magnitude, so any default here would be silently wrong for most models
+    # and would only surface as a failed download.
+    size: ""
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: Filesystem
+    # -- Label selector for binding to a pre-provisioned PV.
+    selector: {}
+    annotations: {}
+    labels: {}
+    # -- Keep the PVC when the release or Argo CD Application is removed.
+    # Re-provisioning and re-downloading a large model is expensive, and an
+    # accidental prune of a bound claim is not something you want to discover
+    # during an incident.
+    retain: true
+    # -- Acknowledge that several replicas will share one volume. Every replica
+    # runs its own storage-initializer, and they all write the same paths at the
+    # same time. Only set this when you have pre-populated the volume and are
+    # confident no concurrent download will occur.
+    allowSharedConcurrentDownload: false
+
   # -- Pod-level security context. Deliberately does NOT set runAsUser:
   # OpenShift's restricted-v2 SCC assigns a UID from the namespace range.
   podSecurityContext:

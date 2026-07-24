@@ -153,12 +153,45 @@ for env_dir in "${ROOT}"/environments/*/; do
     fi
   done < <(yq -r 'select(.kind=="ExternalSecret") | .metadata.name + "\t" + .spec.secretStoreRef.name + "\t" + .spec.secretStoreRef.kind' "${out}")
 
-  # --- an s3:// model with no ephemeral-storage request on the storage-initializer
-  # gets evicted partway through a large download. Advisory, not fatal.
+  # --- persisted models: the pod volume must use KServe's reserved name, or the
+  # controller adds its own emptyDir alongside and the weights go to node disk
+  # anyway — the PVC binds, stays empty, and nothing looks wrong.
+  pvc_bad=""
+  while IFS=$'\t' read -r name ns claim; do
+    [[ -z "${name}" ]] && continue
+    if [[ "${claim}" != "null" && -n "${claim}" ]]; then
+      if ! yq -e "select(.kind==\"PersistentVolumeClaim\" and .metadata.name==\"${claim}\" and .metadata.namespace==\"${ns}\")" "${out}" >/dev/null 2>&1; then
+        printf 'note  %s: %s mounts PVC %s/%s, which this chart does not render — it must already exist\n' "${env}" "${name}" "${ns}" "${claim}"
+      fi
+    fi
+  done < <(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.template.volumes != null) | .metadata.name + "\t" + .metadata.namespace + "\t" + ([.spec.template.volumes[] | select(.name=="kserve-provision-location") | .persistentVolumeClaim.claimName] | .[0] // "null")' "${out}")
+
+  # Any volume this chart declares for model weights must carry that exact name.
+  wrongname="$(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.template.volumes != null) | select([.spec.template.volumes[] | select(.name=="kserve-provision-location")] | length == 0) | .metadata.name' "${out}" | grep -v '^$' || true)"
+  if [[ -z "${wrongname}" ]]; then
+    ok "${env}: model weight volumes use KServe's reserved volume name"
+  else
+    bad "${env}: pod volume not named kserve-provision-location" "${wrongname} — KServe would add its own emptyDir and the PVC would sit unused"
+  fi
+
+  # A created PVC that Argo CD may prune takes the weights with it.
+  unretained="$(yq -r 'select(.kind=="PersistentVolumeClaim") | select((.metadata.annotations."argocd.argoproj.io/sync-options" // "") | test("Prune=false") | not) | .metadata.name' "${out}" | grep -v '^$' || true)"
+  while IFS= read -r p; do
+    [[ -z "${p}" ]] && continue
+    printf 'note  %s: PVC %s is prunable (persistence.retain=false) — deleting it discards the downloaded weights\n' "${env}" "${p}"
+  done <<< "${unretained}"
+
+  # --- an s3:// model downloading to node ephemeral storage with no
+  # ephemeral-storage request gets evicted partway through. Models backed by a
+  # PVC are exempt: their weights never touch node disk. Advisory, not fatal.
   while IFS= read -r name; do
     [[ -z "${name}" ]] && continue
-    printf 'note  %s: %s has no storage-initializer ephemeral-storage request\n' "${env}" "${name}"
-  done < <(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.model.uri | test("^s3://")) | select([.spec.template.initContainers // [] | .[] | select(.name=="storage-initializer") | .resources.requests["ephemeral-storage"] // empty] | length == 0) | .metadata.name' "${out}")
+    printf 'note  %s: %s downloads to node ephemeral storage with no ephemeral-storage request — a large model can be evicted mid-download\n' "${env}" "${name}"
+  done < <(yq -r 'select(.kind=="LLMInferenceService")
+      | select(.spec.model.uri | test("^s3://"))
+      | select([.spec.template.volumes // [] | .[] | select(.name=="kserve-provision-location")] | length == 0)
+      | select([.spec.template.initContainers // [] | .[] | select(.name=="storage-initializer") | .resources.requests["ephemeral-storage"] // empty] | length == 0)
+      | .metadata.name' "${out}")
 
   # --- MaaSModelRef and governance must share a sync wave, or Argo CD deadlocks.
   wave_ref="$(yq -r 'select(.kind=="MaaSModelRef") | .metadata.annotations."argocd.argoproj.io/sync-wave"' "${out}" | sort -u | head -1)"

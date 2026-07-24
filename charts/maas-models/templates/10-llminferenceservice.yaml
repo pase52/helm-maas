@@ -62,6 +62,21 @@ stated explicitly, or the pod is evicted mid-download.
 {{- $_ := set $template "initContainers" (list (dict "name" "storage-initializer" "resources" $si.resources)) -}}
 {{- end -}}
 
+{{/*
+Put the weights on a PVC instead of node ephemeral storage.
+
+KServe's AddModelMount creates its emptyDir only when no volume of the same name
+is already present on the pod. Declaring that volume here is therefore the
+supported way to substitute a claim: KServe still adds the mounts (rw on the
+initContainer, ro on the model container) but leaves the backing volume alone.
+*/}}
+{{- $pers := (include "maas-models.persistence" (dict "root" $root "model" $m) | fromJson) -}}
+{{- if $pers.enabled -}}
+{{- $_ := set $template "volumes" (list (dict
+      "name" (include "maas-models.provisionVolumeName" .)
+      "persistentVolumeClaim" (dict "claimName" (include "maas-models.pvcName" (dict "root" $root "model" $m))))) -}}
+{{- end -}}
+
 {{/* ---- spec ------------------------------------------------------------ */}}
 {{- $model := dict "uri" (include "maas-models.image" (dict "root" $root "ref" $inf.modelUri)) "name" $inf.modelName -}}
 {{- $spec := dict

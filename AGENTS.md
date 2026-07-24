@@ -100,6 +100,8 @@ them from memory:
 | `ExternalSecret.spec.target.template.mergePolicy` | defaults to **`Replace`**, which discards provider data — must be `Merge` for a metadata-only template |
 | ESO Vault auth | `kubernetes` (preferred), `appRole`, `tokenSecretRef` — under `spec.provider.vault.auth` |
 | ClusterSecretStore `serviceAccountRef` | requires `namespace`; cluster-scoped stores cannot resolve a bare name |
+| Substituting the model volume | declare a volume named `kserve-provision-location`; `AddModelMount` skips its emptyDir when one already exists |
+| S3 download idempotency | **none** — `_download_s3` writes unconditionally; a PVC does not avoid the re-download |
 
 ### Model artifact loading
 
@@ -168,10 +170,23 @@ not the test.
    *Enforced by:* `tests/render.sh` ExternalSecret chain check.
 
 10. **Placeholder defaults are worse than empty ones.** `storage.secretStore`
-    ships with `vault.server: ""` and `auth.kubernetes.role: ""` on purpose. A
-    plausible default such as `https://vault.example.com` satisfies validation
-    and fails at runtime against a host that does not exist. Leave required
-    fields empty and let `_validate.tpl` demand them.
+    ships with `vault.server: ""` and `auth.kubernetes.role: ""`, and
+    `persistence.size` is `""`, on purpose. A plausible default such as
+    `https://vault.example.com` or `100Gi` satisfies validation and then fails at
+    runtime. Leave required fields empty and let `_validate.tpl` demand them.
+    This has bitten twice; both times the guard existed and was simply
+    unreachable because the default filled the field in.
+
+11. **The model volume must be named `kserve-provision-location`.** Any other
+    name and KServe appends its own emptyDir; the PVC binds, stays empty, and the
+    weights silently go to node disk. Use the
+    `maas-models.provisionVolumeName` helper, never a literal.
+    *Enforced by:* `tests/render.sh` volume-name check.
+
+12. **Do not claim a PVC avoids re-downloading.** It does not — the
+    storage-initializer rewrites the directory on every pod start. Persistence
+    changes where the bytes land, nothing more. Keep the values.yaml and docs
+    wording that says so; it is the question every reviewer asks.
 
 ---
 

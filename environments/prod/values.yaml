@@ -177,23 +177,32 @@ models:
       modelName: meta-llama/Llama-3.3-70B-Instruct
       image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
       storageProfile: models
-      replicas: 2
+      # One replica: each replica gets its own PVC and its own download, so
+      # scaling this model out is a deliberate capacity decision, not a default.
+      replicas: 1
       env:
         - name: VLLM_ADDITIONAL_ARGS
           value: "--max-model-len 32768 --tensor-parallel-size 4 --dtype bfloat16"
+      # 140 GB of weights do not belong on node ephemeral storage: they would
+      # compete with every co-scheduled pod and risk eviction mid-download.
+      # Note this does not avoid the re-download on restart — the
+      # storage-initializer rewrites the directory every time. It only changes
+      # where the bytes land.
+      persistence:
+        enabled: true
+        storageClassName: ocs-storagecluster-ceph-rbd
+        size: 200Gi
+        accessModes:
+          - ReadWriteOnce
+        retain: true
       storageInitializer:
-        # The weights land on the node's ephemeral storage and are re-downloaded
-        # on every pod start. Without an explicit ephemeral-storage request the
-        # kubelet evicts the pod partway through a 140 GB download.
         resources:
           requests:
             cpu: "2"
             memory: 8Gi
-            ephemeral-storage: 160Gi
           limits:
             cpu: "4"
             memory: 16Gi
-            ephemeral-storage: 200Gi
       resources:
         requests:
           cpu: "8"

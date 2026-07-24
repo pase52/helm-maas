@@ -206,7 +206,10 @@ oc get pod -n <ns> <pod> -o jsonpath='{.spec.serviceAccountName}{"\n"}'
 | `SSLCertVerificationError` | Self-signed endpoint (MinIO/ODF lab) | `verifySsl: "0"`, or supply `caBundleConfigMap` |
 | `AccessDenied` / `403` | Key lacks `s3:GetObject`/`s3:ListBucket` on the prefix | Fix the bucket policy; verify with `aws s3 ls` using the same key |
 | `NoSuchBucket` / downloads 0 files | Wrong prefix, or missing trailing `/` | `modelUri` must point at the directory holding `config.json` |
-| `No space left on device` | Ephemeral storage too small | Raise `storageInitializer.resources` above the full model size |
+| `No space left on device` | Ephemeral storage or PVC too small | Raise `storageInitializer.resources` above the full model size, or `persistence.size` if using a PVC |
+| Pod `Pending`, `volume is already used by pod` | Several replicas on a `ReadWriteOnce` claim | One replica, `ReadWriteMany`, or pre-populate and use `pvc://` |
+| Weights on node disk despite `persistence.enabled` | Pod volume not named `kserve-provision-location` | KServe adds its own emptyDir alongside; `./tests/render.sh` catches this |
+| Corrupt or truncated weights, several replicas | Concurrent storage-initializers on one shared volume | Pre-populate the volume and switch to a `pvc://` modelUri |
 | Very slow, then probe failure | Large model over a slow link | Raise `readinessProbe.initialDelaySeconds` and `failureThreshold` |
 
 Verify the credential chain end to end — all three links must hold:

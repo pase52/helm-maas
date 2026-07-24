@@ -374,14 +374,66 @@ storage:
 
 Two things to size before you deploy:
 
-- **Ephemeral storage.** The weights land on the node's disk, not a PVC, and are
-  re-downloaded on every pod start. Without an explicit
-  `storageInitializer.resources` request the kubelet evicts the pod partway
-  through a large download. For very large models or many replicas, an
-  `oci://` ModelCar or a pre-populated `pvc://` avoids the repeated transfer
-  entirely.
+- **Storage for the weights.** By default they land on the node's ephemeral
+  disk. Without an explicit `storageInitializer.resources` request the kubelet
+  evicts the pod partway through a large download. See
+  [where the weights land](#where-the-weights-land) to put them on a PVC instead.
 - **Readiness probe.** Download time is counted before the first probe fires.
   Raise `readinessProbe.initialDelaySeconds` and `failureThreshold` accordingly.
+
+### Where the weights land
+
+By default KServe mounts an `emptyDir`, so the model sits on the node's ephemeral
+storage — competing with every co-scheduled pod, and capped by the node's disk.
+Enable `persistence` to put it on a PVC instead:
+
+```yaml
+models:
+  - name: llama-3-3-70b
+    inference:
+      modelUri: s3://maas-models/llama-3.3-70b-instruct/
+      persistence:
+        enabled: true
+        storageClassName: ocs-storagecluster-ceph-rbd
+        size: 200Gi
+        accessModes: [ReadWriteOnce]
+        volumeMode: Filesystem
+        retain: true              # survives an Application delete
+        # selector, annotations, labels, existingClaim also available
+```
+
+`size` has no default on purpose — model sizes vary by an order of magnitude, so
+any number here would be silently wrong for most models and would surface only as
+a failed download. Set it above the on-disk size with headroom.
+
+Set defaults for every model under `modelDefaults.persistence`; per-model values
+override them. Point at a volume you already manage with `existingClaim`, in
+which case no PVC is created and the sizing fields are rejected as misleading.
+
+**What a PVC does and does not do.** This is the part worth being precise about:
+
+| | |
+|---|---|
+| ✅ | Keeps weights off node ephemeral storage — no eviction risk, no contention with co-scheduled pods |
+| ✅ | Makes models larger than the node's disk possible at all |
+| ✅ | Survives Application deletion when `retain: true` (the default) |
+| ❌ | **Does not skip the download on restart.** The storage-initializer writes into the target directory unconditionally — there is no skip-if-present for `s3://`. Every pod start re-downloads and overwrites |
+
+A PVC changes *where* the bytes land, not whether they move. To genuinely
+download once and reuse, populate a volume out of band and point `modelUri` at
+it — KServe then mounts it directly and runs no storage-initializer at all:
+
+```yaml
+      modelUri: pvc://llama-weights/llama-3.3-70b-instruct
+```
+
+That is also the right answer for multiple replicas. Each replica runs its own
+storage-initializer, so a shared `ReadWriteMany` claim means N processes writing
+the same files simultaneously — which corrupts the weights rather than
+deduplicating the work. The chart refuses that configuration: `ReadWriteOnce`
+with more than one replica fails because only one pod could mount it, and
+`ReadWriteMany` with more than one replica fails unless you set
+`allowSharedConcurrentDownload: true` to confirm the volume is pre-populated.
 
 `annotateExistingSecret: true` needs `ServerSideApply=true` in the Application's
 `syncOptions` — the chart renders only annotations on that Secret, and a

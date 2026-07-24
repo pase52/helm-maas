@@ -48,6 +48,40 @@ instead of syncing "Healthy" while a model silently never serves traffic.
       {{- fail (printf "models[%s]: LLMInferenceService backend requires `inference.modelName` — this is the model identity clients send in the OpenAI `model` field" $m.name) -}}
     {{- end -}}
 
+    {{/* --- model weight persistence ------------------------------------ */}}
+    {{- $pers := (include "maas-models.persistence" (dict "root" $root "model" $m) | fromJson) -}}
+    {{- if $pers.enabled -}}
+      {{- if and (not $pers.existingClaim) (not $pers.size) -}}
+        {{- fail (printf "models[%s]: `persistence.size` is required when the chart creates the PVC. It must exceed the on-disk model size with headroom — a claim that fills up fails the download partway through." $m.name) -}}
+      {{- end -}}
+      {{- if and $pers.existingClaim (or $pers.storageClassName $pers.selector) -}}
+        {{- fail (printf "models[%s]: `persistence.existingClaim` is set, so `storageClassName`/`selector` are ignored — they apply only to a claim this chart creates. Remove them, or drop existingClaim." $m.name) -}}
+      {{- end -}}
+      {{/*
+      pvc:// already mounts a volume directly and runs no storage-initializer,
+      so a second claim here would be created, mounted over the model directory,
+      and left empty.
+      */}}
+      {{- if hasPrefix "pvc://" $inf.modelUri -}}
+        {{- fail (printf "models[%s]: `persistence` cannot be combined with a pvc:// modelUri — KServe already mounts that claim directly and downloads nothing. Use one or the other." $m.name) -}}
+      {{- end -}}
+      {{/*
+      Every replica runs its own storage-initializer. Sharing one volume across
+      replicas means N processes writing the same files concurrently, which
+      corrupts the weights rather than merely duplicating work.
+      */}}
+      {{- $replicas := ($inf.replicas | default ($root.Values.modelDefaults).replicas | default 1) | int -}}
+      {{- if gt $replicas 1 -}}
+        {{- $modes := $pers.accessModes | default (list "ReadWriteOnce") -}}
+        {{- if not (has "ReadWriteMany" $modes) -}}
+          {{- fail (printf "models[%s]: %d replicas cannot share a %s claim — only one pod could mount it and the rest stay Pending. Use ReadWriteMany, drop to one replica, or pre-populate a volume and switch modelUri to pvc:// so no download happens." $m.name $replicas (join "," $modes)) -}}
+        {{- end -}}
+        {{- if not $pers.allowSharedConcurrentDownload -}}
+          {{- fail (printf "models[%s]: %d replicas sharing one ReadWriteMany claim each run their own storage-initializer, writing the same files at the same time — that corrupts the weights, it does not deduplicate the download. Pre-populate the volume and use a pvc:// modelUri instead, or set `persistence.allowSharedConcurrentDownload: true` if you have already ensured no concurrent download can occur." $m.name $replicas) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+
     {{/* --- object storage credentials --------------------------------- */}}
     {{- $si := $inf.storageInitializer | default dict -}}
     {{- $needsCreds := and (hasPrefix "s3://" $inf.modelUri) (ne $si.enabled false) -}}

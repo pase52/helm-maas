@@ -226,14 +226,44 @@ Rotation semantics are worth stating plainly: ESO refreshes the Secret on its
 consumed once, by the initContainer, at pod start. A rotated key takes effect on
 the next pod restart.
 
+### Where the weights land
+
+`AddModelMount` creates its `emptyDir` only when no volume of that name is
+already present on the pod:
+
+```go
+for _, volume := range podSpec.Volumes {
+    if volume.Name == storageMountParams.VolumeName { volumeExists = true }
+}
+if !volumeExists { /* append emptyDir */ }
+```
+
+Declaring a volume named `kserve-provision-location` in `spec.template.volumes`
+is therefore the supported way to substitute a PVC: KServe still attaches the
+mounts (rw on the initContainer, ro on the model container) but leaves the
+backing volume alone. That is what `persistence.enabled` does.
+
+The name is load-bearing. Any other name and KServe appends its own emptyDir
+alongside; the PVC binds, stays empty, and the weights quietly go to node disk.
+`tests/render.sh` asserts the rendered volume carries it.
+
 ### Operational consequences
 
-- Weights occupy **node ephemeral storage**, not a PVC, and are re-fetched on
-  every pod start. Three replicas of a 140 GB model means three copies and three
-  downloads. `storageInitializer.resources` must request enough
-  `ephemeral-storage` or the kubelet evicts the pod mid-download.
-- For large models or high replica counts, `oci://` (ModelCar, cached by the node
-  image store) or `pvc://` (fetched once, mounted many times) scale better.
+- **A PVC does not avoid the re-download.** `_download_s3` writes into the
+  destination directory unconditionally — there is no skip-if-present check for
+  `s3://`, unlike the local-copy path. Every pod start re-downloads and
+  overwrites. Persistence changes *where* the bytes land, not whether they move.
+- What it does buy: weights off node ephemeral storage, so no eviction risk and
+  no contention with co-scheduled pods, and models larger than the node's disk
+  become possible at all.
+- **Each replica downloads independently.** Three replicas means three
+  downloads. Sharing one `ReadWriteMany` claim does not deduplicate that — it
+  puts three storage-initializers on the same paths at the same time and
+  corrupts the result. The chart rejects that combination unless explicitly
+  acknowledged.
+- To download once and reuse, populate a volume out of band and use a `pvc://`
+  modelUri: KServe mounts it directly and runs no storage-initializer. `oci://`
+  ModelCars get a similar benefit from the node image cache.
 - `storageInitializer.enabled: false` skips the step entirely — required for
   ModelCars, which already carry the weights, and for weightless simulators.
 

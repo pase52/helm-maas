@@ -266,6 +266,32 @@ straight through to environment variables, so they are strings.
 {{- end -}}
 
 {{/*
+The volume name KServe uses for the model directory. Declaring a volume with
+this exact name in spec.template.volumes makes AddModelMount skip creating its
+default emptyDir and use ours instead — that check is how a PVC is substituted.
+Changing this string silently reverts every model to node ephemeral storage.
+*/}}
+{{- define "maas-models.provisionVolumeName" -}}
+kserve-provision-location
+{{- end -}}
+
+{{/*
+Effective persistence settings for a model: per-model over modelDefaults.
+Returns JSON; "{}"-equivalent when disabled.
+*/}}
+{{- define "maas-models.persistence" -}}
+{{- $d := (.root.Values.modelDefaults | default dict).persistence | default dict -}}
+{{- $m := ((.model.inference | default dict).persistence | default dict) -}}
+{{- mergeOverwrite (deepCopy $d) $m | toJson -}}
+{{- end -}}
+
+{{/* Name of the PVC backing a model's weights. */}}
+{{- define "maas-models.pvcName" -}}
+{{- $p := (include "maas-models.persistence" (dict "root" .root "model" .model) | fromJson) -}}
+{{- $p.existingClaim | default (printf "maas-model-%s" .model.name) -}}
+{{- end -}}
+
+{{/*
 Comma-joined names of a model list. Used for the `managed-models` annotation so
 `oc describe maasauthpolicy X` shows what it covers without cross-referencing.
 Usage: include "maas-models.modelNames" $modelList
