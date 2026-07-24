@@ -1,0 +1,41 @@
+# Health check test matrix.
+# Format:  <kind> | <expected status> | <description> | <object JSON>
+# Blank lines and lines starting with # are ignored.
+#
+# Every case here maps to a real failure mode seen when operating MaaS models.
+# If you change a Lua health check, add the case that motivated it.
+
+# --- MaaSModelRef -------------------------------------------------------------
+MaaSModelRef | Progressing | just created, controller has not reconciled | {"spec":{}}
+MaaSModelRef | Healthy     | serving normally | {"status":{"phase":"Ready","endpoint":"https://granite.apps.example.com","conditions":[{"type":"Ready","status":"True"},{"type":"RuntimeReady","status":"True","reason":"RuntimeHealthy"},{"type":"GovernanceAttached","status":"True","reason":"GovernancePaired"}]}}
+MaaSModelRef | Progressing | backend still loading, governance fine | {"status":{"phase":"Pending","conditions":[{"type":"RuntimeReady","status":"False","reason":"BackendNotReady","message":"waiting for LLMInferenceService"},{"type":"GovernanceAttached","status":"True","reason":"GovernancePaired"}]}}
+MaaSModelRef | Degraded    | no auth policy or subscription covers the model | {"status":{"phase":"Pending","conditions":[{"type":"RuntimeReady","status":"True","reason":"RuntimeHealthy"},{"type":"GovernanceAttached","status":"False","reason":"NoPairingFound","message":"no MaaSSubscription references this model"}]}}
+MaaSModelRef | Degraded    | governance gap | {"status":{"phase":"Pending","conditions":[{"type":"GovernanceAttached","status":"False","reason":"GovernanceGap","message":"AuthPolicy present but no Subscription"}]}}
+MaaSModelRef | Degraded    | governed but runtime failing = live outage | {"status":{"phase":"Unhealthy","conditions":[{"type":"RuntimeReady","status":"False","reason":"RuntimeHealthFailure","message":"HTTPRoute not accepted"},{"type":"GovernanceAttached","status":"True"}]}}
+MaaSModelRef | Degraded    | invalid spec | {"status":{"phase":"Invalid","conditions":[{"type":"Ready","status":"False","message":"modelRef.kind unsupported"}]}}
+MaaSModelRef | Degraded    | reconcile failure | {"status":{"phase":"Failed","conditions":[{"type":"Ready","status":"False","message":"get backend: forbidden"}]}}
+
+# --- MaaSAuthPolicy -----------------------------------------------------------
+MaaSAuthPolicy | Healthy     | enforced on all models | {"status":{"phase":"Active","authPolicies":[{"name":"a","model":"m1","ready":true},{"name":"b","model":"m2","ready":true}]}}
+MaaSAuthPolicy | Degraded    | one underlying Kuadrant AuthPolicy broken | {"status":{"phase":"Degraded","authPolicies":[{"name":"a","model":"m1","ready":true},{"name":"b","model":"m2","ready":false,"message":"target HTTPRoute not found"}]}}
+MaaSAuthPolicy | Progressing | waiting for model refs | {"status":{"phase":"Pending"}}
+MaaSAuthPolicy | Degraded    | invalid spec | {"status":{"phase":"Invalid"}}
+MaaSAuthPolicy | Degraded    | reconcile failed | {"status":{"phase":"Failed","authPolicies":[{"name":"a","model":"m1","ready":false}]}}
+
+# --- MaaSSubscription ---------------------------------------------------------
+MaaSSubscription | Healthy     | quotas enforced | {"status":{"phase":"Active","modelRefStatuses":[{"name":"m1","ready":true}],"tokenRateLimitStatuses":[{"name":"t1","ready":true}]}}
+MaaSSubscription | Degraded    | rate limits not actually enforced | {"status":{"phase":"Degraded","modelRefStatuses":[{"name":"m1","ready":true},{"name":"m2","ready":false}],"tokenRateLimitStatuses":[{"name":"t1","ready":false}]}}
+MaaSSubscription | Progressing | not reconciled yet | {}
+MaaSSubscription | Degraded    | invalid window or refs | {"status":{"phase":"Invalid"}}
+
+# --- ExternalModel ------------------------------------------------------------
+ExternalModel | Healthy     | provider reachable | {"spec":{"provider":"openai","targetModel":"gpt-4o","endpoint":"api.openai.com"},"status":{"phase":"Ready"}}
+ExternalModel | Degraded    | failed with no detail, fall back to hint | {"spec":{"provider":"openai","targetModel":"gpt-4o","endpoint":"api.openai.com"},"status":{"phase":"Failed"}}
+ExternalModel | Progressing | credential secret missing | {"spec":{"provider":"anthropic","targetModel":"claude"},"status":{"phase":"Pending","conditions":[{"type":"Ready","status":"False","message":"secret not found"}]}}
+
+# --- LLMInferenceService ------------------------------------------------------
+LLMInferenceService | Healthy     | serving | {"status":{"url":"https://m.apps.example.com","conditions":[{"type":"Ready","status":"True"}]}}
+LLMInferenceService | Progressing | model still loading, will resolve | {"status":{"conditions":[{"type":"Ready","status":"False","reason":"Deploying","message":"waiting for pods"},{"type":"WorkloadReady","status":"False","reason":"Deploying"}]}}
+LLMInferenceService | Degraded    | image pull denied, needs a human | {"status":{"conditions":[{"type":"Ready","status":"False","reason":"ImagePullBackOff","message":"pull registry.redhat.io denied"}]}}
+LLMInferenceService | Degraded    | no GPU capacity, needs a human | {"status":{"conditions":[{"type":"Ready","status":"False","reason":"Unschedulable","message":"0/6 nodes have nvidia.com/gpu"}]}}
+LLMInferenceService | Progressing | no conditions reported yet | {"status":{}}

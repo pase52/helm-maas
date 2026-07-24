@@ -1,0 +1,18 @@
+{{/* Run validation once, before anything else is rendered. */}}
+{{- include "maas-models.validate" . -}}
+
+{{- if .Values.namespaces.create -}}
+{{- $root := . -}}
+{{- $wanted := list .Values.global.tenantNamespace -}}
+{{- range $m := (include "maas-models.enabledModels" $root | fromJsonArray) -}}
+{{- $wanted = append $wanted (include "maas-models.modelNamespace" (dict "root" $root "model" $m)) -}}
+{{- end -}}
+{{- range $ns := ($wanted | uniq | sortAlpha) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  {{- include "maas-models.metadata" (dict "root" $root "component" "namespace" "wave" "namespace" "annotations" $root.Values.namespaces.annotations "extraLabels" $root.Values.namespaces.labels) | nindent 2 }}
+{{- end }}
+{{- end }}

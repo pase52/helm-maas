@@ -1,0 +1,109 @@
+{{/*
+PrometheusRule — optional paging layer on top of the Argo CD health checks.
+
+IMPORTANT — read before enabling.
+MaaSModelRef `status.phase` is a custom-resource field. Prometheus does not see
+it unless kube-state-metrics is configured with a CustomResourceState spec.
+This chart ships that spec (see 42-crd-metrics-configmap.yaml,
+`observability.customResourceStateMetrics.enabled`), but wiring it into the
+kube-state-metrics deployment is a cluster-admin action — see docs/HEALTH.md.
+
+Therefore:
+  * The `MaaSModelNotReady` / `MaaSGovernanceDegraded` rules below require
+    customResourceStateMetrics to be wired up. They are the accurate signal.
+  * The `MaaSModelWorkloadUnavailable` rule only needs stock kube-state-metrics
+    and covers the most common failure (pods not coming up). Enabled always.
+
+Requires user-workload monitoring: `oc -n openshift-monitoring get cm cluster-monitoring-config`.
+*/}}
+{{- if .Values.observability.prometheusRule.enabled }}
+{{- $root := . -}}
+{{- $pr := .Values.observability.prometheusRule -}}
+{{- $ns := $pr.namespace | default .Values.global.tenantNamespace -}}
+{{- $for := $pr.readinessGracePeriod | default "30m" -}}
+{{- $sev := $pr.severity | default "warning" -}}
+{{- $env := .Values.environment -}}
+{{/*
+Alert labels are built as a dict and rendered once. Emitting `environment:` and
+then splatting alertLabels underneath duplicates the key whenever an operator
+also sets `environment` there — which prod does. A duplicate key renders fine and
+is rejected at apply time.
+*/}}
+{{- $baseLabels := merge (dict "environment" ($env | toString)) (deepCopy ($pr.alertLabels | default dict)) -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-model-health
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict "root" $root "component" "alerting" "wave" "observability" "extraLabels" $pr.labels) | nindent 2 }}
+spec:
+  groups:
+    - name: maas-models.{{ $env }}
+      rules:
+        {{- if .Values.observability.customResourceStateMetrics.enabled }}
+        - alert: MaaSModelNotReady
+          expr: |
+            max by (namespace, name) (maas_model_phase{phase="Ready"}) == 0
+          for: {{ $for }}
+          labels:
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
+          annotations:
+            summary: "MaaS model {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is not Ready"
+            description: >-
+              The MaaSModelRef has not reached phase=Ready for {{ $for }}.
+              Check whether the backend is serving (RuntimeReady) or whether
+              governance is missing (GovernanceAttached):
+              oc get maasmodelref {{ `{{ $labels.name }}` }} -n {{ `{{ $labels.namespace }}` }} -o yaml
+            runbook_url: "https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md#maasmodelref-not-ready"
+            {{- with $pr.alertAnnotations }}{{ toYaml . | nindent 12 }}{{- end }}
+
+        - alert: MaaSModelUnhealthy
+          expr: |
+            max by (namespace, name) (maas_model_phase{phase="Unhealthy"}) == 1
+          for: 10m
+          labels:
+            {{- toYaml (merge (dict "severity" "critical") $baseLabels) | nindent 12 }}
+          annotations:
+            summary: "MaaS model {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is Unhealthy"
+            description: >-
+              Governance is attached but the backend runtime is failing — callers
+              are being rejected or timing out. This is a live outage for the model.
+            runbook_url: "https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md#maasmodelref-unhealthy"
+            {{- with $pr.alertAnnotations }}{{ toYaml . | nindent 12 }}{{- end }}
+
+        - alert: MaaSGovernanceDegraded
+          expr: |
+            max by (namespace, name) (maas_authpolicy_phase{phase=~"Degraded|Failed|Invalid"}) == 1
+            or
+            max by (namespace, name) (maas_subscription_phase{phase=~"Degraded|Failed|Invalid"}) == 1
+          for: 15m
+          labels:
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
+          annotations:
+            summary: "MaaS governance object {{ `{{ $labels.namespace }}/{{ $labels.name }}` }} is degraded"
+            description: >-
+              A MaaSAuthPolicy or MaaSSubscription failed to produce healthy
+              Kuadrant policies. Access control or token limits may not be enforced.
+            runbook_url: "https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md#governance-degraded"
+            {{- with $pr.alertAnnotations }}{{ toYaml . | nindent 12 }}{{- end }}
+        {{- end }}
+
+        {{/* Works with stock kube-state-metrics — no extra wiring needed. */}}
+        - alert: MaaSModelWorkloadUnavailable
+          expr: |
+            max by (namespace, deployment) (
+              kube_deployment_status_replicas_unavailable{namespace=~"{{ include "maas-models.namespaceRegex" $root }}"}
+            ) > 0
+          for: {{ $for }}
+          labels:
+            {{- toYaml (merge (dict "severity" $sev) $baseLabels) | nindent 12 }}
+          annotations:
+            summary: "Model workload {{ `{{ $labels.namespace }}/{{ $labels.deployment }}` }} has unavailable replicas"
+            description: >-
+              A KServe-managed deployment backing a MaaS model has unavailable
+              replicas. Common causes: image pull failure on registry.redhat.io,
+              insufficient GPU capacity, or the model failing to load within the
+              readiness probe window.
+            runbook_url: "https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md#workload-unavailable"
+            {{- with $pr.alertAnnotations }}{{ toYaml . | nindent 12 }}{{- end }}
+{{- end }}

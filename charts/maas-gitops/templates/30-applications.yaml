@@ -1,0 +1,120 @@
+{{- $root := . -}}
+{{- range $app := .Values.applications }}
+{{- if ne $app.enabled false }}
+{{- $c := (include "maas-gitops.appConfig" (dict "root" $root "app" $app)) | fromJson }}
+{{- $sync := $c.syncPolicy | default dict }}
+{{- $auto := $sync.automated | default dict }}
+{{- $helm := $c.helm | default dict }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ $c.name }}
+  namespace: {{ $c.namespace | default $root.Values.argocd.namespace }}
+  labels:
+    {{- include "maas-gitops.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: application
+    {{- with $c.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $c.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if $c.cascadeDeleteFinalizer }}
+  {{/*
+  Cascade delete is ON for this Application: deleting it deletes every model,
+  policy and subscription it manages. Only set this where losing the workloads
+  on an accidental `oc delete application` is acceptable.
+  */}}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  {{- end }}
+spec:
+  {{/*
+  Defaults to the AppProject this chart renders, but stays overridable: with
+  `appProject.enabled: false` the project is managed elsewhere, and an
+  Application naming a project that does not exist is rejected outright.
+  */}}
+  project: {{ $c.project | default $root.Values.appProject.name }}
+
+  source:
+    repoURL: {{ $c.repoURL }}
+    targetRevision: {{ $c.targetRevision }}
+    path: {{ $c.path }}
+    helm:
+      {{- with $helm.releaseName }}
+      releaseName: {{ . }}
+      {{- end }}
+      {{- with $helm.valueFiles }}
+      valueFiles:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $helm.ignoreMissingValueFiles }}
+      ignoreMissingValueFiles: true
+      {{- end }}
+      {{- with $helm.parameters }}
+      parameters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $helm.values }}
+      values: |
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- if $helm.skipCrds }}
+      {{/* MaaS CRDs belong to the platform install, not to this chart. */}}
+      skipCrds: true
+      {{- end }}
+
+  destination:
+    server: {{ $c.destination.server }}
+    namespace: {{ $c.destination.namespace }}
+
+  revisionHistoryLimit: {{ $c.revisionHistoryLimit | int }}
+
+  syncPolicy:
+    {{- if $auto.enabled }}
+    automated:
+      prune: {{ $auto.prune | default false }}
+      selfHeal: {{ $auto.selfHeal | default false }}
+      allowEmpty: {{ $auto.allowEmpty | default false }}
+    {{- else }}
+    # Auto-sync deliberately absent: ops drive syncs for this Application.
+    # Argo CD reports OutOfSync and waits for a human.
+    {{- end }}
+    {{- /*
+    PrunePropagationPolicy is expressed as a sync option, not a top-level field.
+    Append it unless the operator already spelled one out in syncOptions.
+    */}}
+    {{- $opts := $sync.syncOptions | default list }}
+    {{- $hasPropagation := false }}
+    {{- range $o := $opts }}
+    {{- if hasPrefix "PrunePropagationPolicy=" $o }}{{ $hasPropagation = true }}{{ end }}
+    {{- end }}
+    {{- if and $c.prunePropagationPolicy (not $hasPropagation) }}
+    {{- $opts = append $opts (printf "PrunePropagationPolicy=%s" $c.prunePropagationPolicy) }}
+    {{- end }}
+    {{- with $opts }}
+    syncOptions:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $sync.retry }}
+    retry:
+      limit: {{ .limit | int }}
+      {{- with .backoff }}
+      backoff:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+
+  {{- with $c.ignoreDifferences }}
+  ignoreDifferences:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with $c.info }}
+  info:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

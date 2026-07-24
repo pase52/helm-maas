@@ -1,0 +1,119 @@
+{{/*
+LLMInferenceService — the on-cluster inference workload (KServe).
+
+The `router.gateway.refs` entry is what puts the model behind the MaaS gateway.
+Without it the model serves traffic but bypasses Authorino/Limitador entirely,
+so no authentication and no token accounting apply.
+*/}}
+{{- $root := . -}}
+{{- $defaults := .Values.modelDefaults | default dict -}}
+{{- range $m := (include "maas-models.enabledModels" $root | fromJsonArray) }}
+{{- if eq ($m.backend | default "LLMInferenceService") "LLMInferenceService" }}
+{{- $inf := $m.inference | default dict }}
+{{- $ns := include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+{{- $gw := $inf.gateway | default $root.Values.global.gateway }}
+
+{{/* ---- pod template ---------------------------------------------------- */}}
+{{- $container := dict "name" "main" -}}
+{{- with $inf.image -}}
+{{- $_ := set $container "image" (include "maas-models.image" (dict "root" $root "ref" .)) -}}
+{{- $_ := set $container "imagePullPolicy" ($inf.imagePullPolicy | default "IfNotPresent") -}}
+{{- end -}}
+{{- $env := concat ($defaults.env | default list) ($inf.env | default list) -}}
+{{- if $env -}}{{- $_ := set $container "env" $env -}}{{- end -}}
+{{- $res := $inf.resources | default $defaults.resources -}}
+{{- if $res -}}{{- $_ := set $container "resources" $res -}}{{- end -}}
+{{- $readiness := $inf.readinessProbe | default $defaults.readinessProbe -}}
+{{- if $readiness -}}{{- $_ := set $container "readinessProbe" $readiness -}}{{- end -}}
+{{- $liveness := $inf.livenessProbe | default $defaults.livenessProbe -}}
+{{- if $liveness -}}{{- $_ := set $container "livenessProbe" $liveness -}}{{- end -}}
+{{- $sc := $inf.securityContext | default $defaults.securityContext -}}
+{{- if $sc -}}{{- $_ := set $container "securityContext" $sc -}}{{- end -}}
+
+{{- $template := dict "containers" (list $container) -}}
+{{- $nodeSelector := $inf.nodeSelector | default $defaults.nodeSelector -}}
+{{- if $nodeSelector -}}{{- $_ := set $template "nodeSelector" $nodeSelector -}}{{- end -}}
+{{- $tolerations := $inf.tolerations | default $defaults.tolerations -}}
+{{- if $tolerations -}}{{- $_ := set $template "tolerations" $tolerations -}}{{- end -}}
+{{- $affinity := $inf.affinity | default $defaults.affinity -}}
+{{- if $affinity -}}{{- $_ := set $template "affinity" $affinity -}}{{- end -}}
+{{- $podSc := $inf.podSecurityContext | default $defaults.podSecurityContext -}}
+{{- if $podSc -}}{{- $_ := set $template "securityContext" $podSc -}}{{- end -}}
+{{- $pullSecrets := $inf.imagePullSecrets | default $root.Values.global.imagePullSecrets -}}
+{{- if $pullSecrets -}}{{- $_ := set $template "imagePullSecrets" $pullSecrets -}}{{- end -}}
+
+{{/*
+ServiceAccount carrying the object-storage credentials. KServe's
+storage-initializer resolves S3 credentials only from the Secrets attached to
+this ServiceAccount — without it, an s3:// modelUri fails to download.
+An explicit `serviceAccountName` wins over the profile's derived name.
+*/}}
+{{- $sa := include "maas-models.storageServiceAccount" (dict "root" $root "model" $m) -}}
+{{- if $sa -}}{{- $_ := set $template "serviceAccountName" $sa -}}{{- end -}}
+
+{{/*
+storage-initializer resource overrides. The controller strips a user-supplied
+initContainer of this name and merges it over the one it generates, so we only
+declare what differs. Large models need the ephemeral-storage headroom to be
+stated explicitly, or the pod is evicted mid-download.
+*/}}
+{{- $si := $inf.storageInitializer | default dict -}}
+{{- if $si.resources -}}
+{{- $_ := set $template "initContainers" (list (dict "name" "storage-initializer" "resources" $si.resources)) -}}
+{{- end -}}
+
+{{/*
+Put the weights on a PVC instead of node ephemeral storage.
+
+KServe's AddModelMount creates its emptyDir only when no volume of the same name
+is already present on the pod. Declaring that volume here is therefore the
+supported way to substitute a claim: KServe still adds the mounts (rw on the
+initContainer, ro on the model container) but leaves the backing volume alone.
+*/}}
+{{- $pers := (include "maas-models.persistence" (dict "root" $root "model" $m) | fromJson) -}}
+{{- if $pers.enabled -}}
+{{- $_ := set $template "volumes" (list (dict
+      "name" (include "maas-models.provisionVolumeName" .)
+      "persistentVolumeClaim" (dict "claimName" (include "maas-models.pvcName" (dict "root" $root "model" $m))))) -}}
+{{- end -}}
+
+{{/* ---- spec ------------------------------------------------------------ */}}
+{{- $model := dict "uri" (include "maas-models.image" (dict "root" $root "ref" $inf.modelUri)) "name" $inf.modelName -}}
+{{- $spec := dict
+      "model" $model
+      "replicas" (($inf.replicas | default $defaults.replicas) | int)
+      "router" (dict "route" dict "gateway" (dict "refs" (list (dict "name" $gw.name "namespace" $gw.namespace))))
+      "template" $template
+-}}
+{{/*
+Explicitly disabling the storage-initializer is how a ModelCar (oci://) or a
+weightless simulator avoids a pointless download step. `hasKey` rather than
+`default`, because `default` treats false as empty.
+*/}}
+{{- if hasKey $si "enabled" -}}
+{{- $_ := set $spec "storageInitializer" (dict "enabled" $si.enabled) -}}
+{{- end -}}
+{{- with $inf.parallelism }}{{- $_ := set $spec "parallelism" . -}}{{- end -}}
+{{- with $inf.worker }}{{- $_ := set $spec "worker" . -}}{{- end -}}
+{{- with $inf.scheduler }}{{- $_ := set $spec "scheduler" . -}}{{- end -}}
+{{/* Escape hatch: anything not modelled above (prefill/decode split, LoRA, etc.). */}}
+{{- $spec = mergeOverwrite $spec ($inf.extraSpec | default dict) -}}
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: LLMInferenceService
+metadata:
+  name: {{ $m.name }}
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "model" $m
+        "component" "inference-service"
+        "wave" "workload"
+        "annotations" (merge (dict) ($inf.annotations | default dict) (dict
+          "openshift.io/display-name" (($m.catalog | default dict).displayName | default $m.name)
+          "openshift.io/description" (($m.catalog | default dict).description | default "")))
+        "extraLabels" ($m.labels | default dict)) | nindent 2 }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}
+{{- end }}

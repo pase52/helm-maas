@@ -1,0 +1,72 @@
+{{/*
+Inventory ConfigMap — declarative source of truth for "what is supposed to be
+running in this environment, and who is allowed to call it".
+
+This is intentionally a flat, greppable document rather than a dashboard. It is
+what an on-call engineer reads first when a team reports "our model is gone",
+and what an auditor reads to answer "who could call model X on 2026-07-01" —
+answerable from git history alone.
+*/}}
+{{- if .Values.observability.inventory.enabled }}
+{{- $root := . -}}
+{{- $models := (include "maas-models.enabledModels" $root | fromJsonArray) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-model-inventory
+  namespace: {{ .Values.global.tenantNamespace }}
+  {{- include "maas-models.metadata" (dict "root" $root "component" "inventory" "wave" "observability") | nindent 2 }}
+data:
+  environment: {{ .Values.environment | quote }}
+  chartVersion: {{ .Chart.Version | quote }}
+  modelCount: {{ len $models | quote }}
+  models.yaml: |
+    {{- range $m := $models }}
+    - name: {{ $m.name }}
+      tier: {{ $m.tier | default "default" }}
+      backend: {{ $m.backend | default "LLMInferenceService" }}
+      namespace: {{ include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+      displayName: {{ (($m.catalog | default dict).displayName | default $m.name) | quote }}
+      {{- if eq ($m.backend | default "LLMInferenceService") "ExternalModel" }}
+      provider: {{ ($m.external | default dict).provider }}
+      targetModel: {{ ($m.external | default dict).targetModel }}
+      {{- else }}
+      modelName: {{ ($m.inference | default dict).modelName }}
+      modelUri: {{ ($m.inference | default dict).modelUri }}
+      replicas: {{ ($m.inference | default dict).replicas | default $root.Values.modelDefaults.replicas }}
+      {{- end }}
+      governance:
+        accessPolicies:
+          {{- $found := false }}
+          {{- range $p := $root.Values.accessPolicies }}
+          {{- if ne $p.enabled false }}
+          {{- range $sm := (include "maas-models.selectModels" (dict "root" $root "selector" $p.modelSelector) | fromJsonArray) }}
+          {{- if eq $sm.name $m.name }}
+          {{- $found = true }}
+          - name: {{ $p.name }}
+            groups: {{ (($p.subjects | default dict).groups | default list) | toJson }}
+            users: {{ (($p.subjects | default dict).users | default list) | toJson }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- if not $found }} []{{ end }}
+        subscriptions:
+          {{- $found := false }}
+          {{- range $s := $root.Values.subscriptions }}
+          {{- if ne $s.enabled false }}
+          {{- range $sm := (include "maas-models.selectModels" (dict "root" $root "selector" $s.modelSelector) | fromJsonArray) }}
+          {{- if eq $sm.name $m.name }}
+          {{- $found = true }}
+          {{- $ovr := get ($s.perModel | default dict) $m.name | default dict }}
+          - name: {{ $s.name }}
+            priority: {{ $s.priority | default 0 }}
+            groups: {{ (($s.owner | default dict).groups | default list) | toJson }}
+            tokenRateLimits: {{ ($ovr.tokenRateLimits | default $s.tokenRateLimits) | toJson }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- if not $found }} []{{ end }}
+    {{- end }}
+{{- end }}

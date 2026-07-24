@@ -1,0 +1,639 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "maas-models values",
+  "description": "Declarative model catalogue for Models-as-a-Service on Red Hat OpenShift AI. Helm validates every values file against this schema before rendering, so a typo fails the Argo CD sync with a precise path instead of deploying a half-configured model.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["environment", "global"],
+  "properties": {
+    "environment": {
+      "type": "string",
+      "description": "Environment name, surfaced as a label on every rendered object.",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+
+    "global": {
+      "type": "object",
+      "required": ["tenantNamespace", "modelNamespace", "gateway"],
+      "properties": {
+        "tenantNamespace": { "$ref": "#/definitions/namespaceName" },
+        "modelNamespace": { "$ref": "#/definitions/namespaceName" },
+        "gateway": {
+          "type": "object",
+          "required": ["name", "namespace"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "namespace": { "$ref": "#/definitions/namespaceName" }
+          }
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } }
+          }
+        },
+        "registryMirror": {
+          "type": "string",
+          "description": "Registry prefix for disconnected clusters, e.g. mirror.corp.example.com/rh"
+        }
+      }
+    },
+
+    "namespaces": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" }
+      }
+    },
+
+    "argocd": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "syncWaves": {
+          "type": "object",
+          "description": "modelRef and governance must share a wave: they are mutually dependent and splitting them deadlocks the sync.",
+          "additionalProperties": { "type": "string", "pattern": "^-?[0-9]+$" }
+        },
+        "syncOptions": { "type": "array", "items": { "type": "string" } },
+        "compareOptions": { "type": "string" }
+      }
+    },
+
+    "storage": {
+      "type": "object",
+      "description": "Credentials for pulling model weights from object storage.",
+      "properties": {
+        "secretStore": {
+          "type": "object",
+          "description": "The single External Secrets Operator store backing every model's credential.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "create": { "type": "boolean" },
+            "name": { "type": "string" },
+            "kind": {
+              "type": "string",
+              "enum": ["SecretStore", "ClusterSecretStore"]
+            },
+            "vault": {
+              "type": "object",
+              "properties": {
+                "server": {
+                  "type": "string",
+                  "comment": "Empty is allowed so the disabled default validates; _validate.tpl requires a real value once secretStore.enabled is set.",
+                  "pattern": "^(https?://.+)?$",
+                  "description": "Vault address including scheme. Required when storage.secretStore.enabled is true."
+                },
+                "path": { "type": "string", "description": "KV mount point." },
+                "version": { "type": "string", "enum": ["v1", "v2"] },
+                "namespace": { "type": "string", "description": "Vault Enterprise namespace." },
+                "caProviderConfigMap": { "type": "string" },
+                "caProviderConfigMapKey": { "type": "string" },
+                "auth": {
+                  "type": "object",
+                  "properties": {
+                    "kubernetes": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": { "type": "boolean" },
+                        "mountPath": { "type": "string" },
+                        "role": { "type": "string" },
+                        "serviceAccountRef": {
+                          "type": "object",
+                          "properties": {
+                            "name": { "type": "string" },
+                            "namespace": { "type": "string" }
+                          }
+                        }
+                      }
+                    },
+                    "appRole": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": { "type": "boolean" },
+                        "path": { "type": "string" },
+                        "roleId": { "type": "string" },
+                        "secretRef": {
+                          "type": "object",
+                          "properties": {
+                            "name": { "type": "string" },
+                            "key": { "type": "string" },
+                            "namespace": { "type": "string" }
+                          }
+                        }
+                      }
+                    },
+                    "tokenSecretRef": {
+                      "type": "object",
+                      "properties": {
+                        "name": { "type": "string" },
+                        "key": { "type": "string" },
+                        "namespace": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "externalSecrets": {
+          "type": "object",
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "enum": ["external-secrets.io/v1", "external-secrets.io/v1beta1"],
+              "description": "v1 is current; ESO older than 0.15 still serves v1beta1."
+            },
+            "refreshInterval": {
+              "type": "string",
+              "pattern": "^[0-9]+(s|m|h)$"
+            }
+          }
+        },
+        "s3": {
+          "type": "array",
+          "description": "Named S3 credential profiles, referenced by inference.storageProfile.",
+          "items": { "$ref": "#/definitions/s3Profile" }
+        }
+      }
+    },
+
+    "modelDefaults": {
+      "type": "object",
+      "properties": {
+        "persistence": { "$ref": "#/definitions/persistence" }
+      }
+    },
+
+    "models": {
+      "type": "array",
+      "description": "The model catalogue. One entry per published model.",
+      "items": { "$ref": "#/definitions/model" }
+    },
+
+    "accessPolicies": {
+      "type": "array",
+      "description": "MaaSAuthPolicy objects: who may call which models.",
+      "items": { "$ref": "#/definitions/accessPolicy" }
+    },
+
+    "subscriptions": {
+      "type": "array",
+      "description": "MaaSSubscription objects: token quotas per group or user.",
+      "items": { "$ref": "#/definitions/subscription" }
+    },
+
+    "observability": {
+      "type": "object",
+      "properties": {
+        "inventory": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "customResourceStateMetrics": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "labels": { "type": "object" },
+            "readinessGracePeriod": {
+              "type": "string",
+              "pattern": "^[0-9]+(s|m|h)$"
+            },
+            "severity": {
+              "type": "string",
+              "enum": ["info", "warning", "critical"]
+            },
+            "alertLabels": { "type": "object" },
+            "alertAnnotations": { "type": "object" }
+          }
+        }
+      }
+    },
+
+    "commonLabels": { "type": "object" },
+    "commonAnnotations": { "type": "object" },
+
+    "validation": {
+      "type": "object",
+      "properties": {
+        "requireAccessPolicy": { "type": "boolean" },
+        "requireSubscription": { "type": "boolean" },
+        "forbidInlineSecrets": { "type": "boolean" }
+      }
+    }
+  },
+
+  "definitions": {
+    "namespaceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+
+    "dns1123": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+
+    "persistence": {
+      "type": "object",
+      "description": "Where downloaded weights land. Disabled: an emptyDir on node ephemeral storage. Enabled: a PVC. Note this does not skip the download on restart — the storage-initializer rewrites the directory every pod start.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingClaim": {
+          "type": "string",
+          "description": "Use a PVC you manage. Mutually exclusive with the sizing fields."
+        },
+        "storageClassName": {
+          "type": "string",
+          "description": "Empty uses the cluster default. \"-\" disables dynamic provisioning, binding only to a matching pre-created PV."
+        },
+        "size": {
+          "type": "string",
+          "comment": "Empty is allowed so the disabled default validates; _validate.tpl requires it once persistence is enabled.",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?)?$",
+          "description": "Must exceed the on-disk model size with headroom. Required when persistence is enabled without an existingClaim."
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]
+          }
+        },
+        "volumeMode": {
+          "type": "string",
+          "enum": ["Filesystem", "Block"]
+        },
+        "selector": { "type": "object" },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" },
+        "retain": {
+          "type": "boolean",
+          "description": "Keep the PVC on release or Application deletion. Default true."
+        },
+        "allowSharedConcurrentDownload": {
+          "type": "boolean",
+          "description": "Acknowledge that multiple replicas sharing one volume each run their own storage-initializer, writing the same paths concurrently."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "s3Profile": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/definitions/dns1123" },
+        "enabled": { "type": "boolean" },
+        "endpoint": {
+          "type": "string",
+          "description": "S3 endpoint. Omit for real AWS S3; set for ODF/MinIO, e.g. s3.openshift-storage.svc:443"
+        },
+        "region": { "type": "string" },
+        "useHttps": {
+          "type": "string",
+          "enum": ["0", "1"],
+          "description": "Passed through to S3_USE_HTTPS. Inferred from the endpoint scheme when unset."
+        },
+        "verifySsl": {
+          "type": "string",
+          "enum": ["0", "1"],
+          "description": "Passed through to S3_VERIFY_SSL."
+        },
+        "useVirtualBucket": { "type": "string" },
+        "useAccelerate": { "type": "string" },
+        "useAnonymousCredential": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Public bucket — no keys needed."
+        },
+        "caBundleConfigMap": { "type": "string" },
+        "externalSecret": {
+          "type": "object",
+          "description": "Vault-backed credentials: one Vault secret, ExternalSecret and ServiceAccount per model.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "basePath": {
+              "type": "string",
+              "pattern": "^[^/].*",
+              "description": "Vault folder holding one secret per model, relative to the KV mount. The model name (or inference.externalSecretKey) is appended."
+            },
+            "properties": {
+              "type": "object",
+              "description": "Field names inside each Vault secret.",
+              "properties": {
+                "accessKeyId": { "type": "string" },
+                "secretAccessKey": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "storeRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "kind": {
+                  "type": "string",
+                  "enum": ["SecretStore", "ClusterSecretStore"]
+                }
+              },
+              "additionalProperties": false
+            },
+            "refreshInterval": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "existingSecret": {
+          "type": "string",
+          "description": "Secret carrying awsAccessKeyID and awsSecretAccessKey. Mutually exclusive with create and roleArn."
+        },
+        "annotateExistingSecret": {
+          "type": "boolean",
+          "description": "Apply the S3 settings above as annotations on the existing Secret. KServe reads them from the Secret, not the ServiceAccount."
+        },
+        "create": {
+          "type": "boolean",
+          "description": "Render the Secret from accessKeyId/secretAccessKey. Writes the key into git — sandbox only."
+        },
+        "accessKeyId": { "type": "string" },
+        "secretAccessKey": { "type": "string" },
+        "roleArn": {
+          "type": "string",
+          "description": "AWS IRSA role ARN. Annotates the ServiceAccount and skips static keys entirely."
+        },
+        "serviceAccountName": {
+          "type": "string",
+          "description": "Defaults to maas-s3-<name>."
+        },
+        "extraNamespaces": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/namespaceName" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "modelSelector": {
+      "type": "object",
+      "description": "Selects models. A model matches if ANY criterion matches. An empty selector matches nothing — it fails closed rather than granting access by accident.",
+      "properties": {
+        "all": { "type": "boolean" },
+        "tiers": { "type": "array", "items": { "type": "string" } },
+        "names": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+
+    "tokenRateLimits": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["limit", "window"],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum tokens allowed in the window."
+          },
+          "window": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,3}(s|m|h)$",
+            "description": "Time window. Seconds, minutes or hours only — days were removed from the API, use 24h rather than 1d."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+
+    "model": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/definitions/dns1123" },
+        "enabled": { "type": "boolean" },
+        "backend": {
+          "type": "string",
+          "enum": ["LLMInferenceService", "ExternalModel"]
+        },
+        "tier": { "type": "string" },
+        "namespace": { "$ref": "#/definitions/namespaceName" },
+        "tenantRef": { "$ref": "#/definitions/dns1123" },
+        "endpointOverride": { "type": "string", "format": "uri" },
+        "labels": { "type": "object" },
+        "catalog": {
+          "type": "object",
+          "description": "Metadata returned by GET /v1/models under modelDetails.",
+          "properties": {
+            "displayName": { "type": "string" },
+            "description": { "type": "string" },
+            "genaiUseCase": { "type": "string" },
+            "contextWindow": { "type": ["integer", "string"] },
+            "capabilities": { "type": "array", "items": { "type": "string" } },
+            "annotations": { "type": "object" }
+          }
+        },
+        "inference": {
+          "type": "object",
+          "description": "LLMInferenceService backend settings.",
+          "properties": {
+            "modelUri": {
+              "type": "string",
+              "pattern": "^(oci|hf|s3|pvc|gs|https?)://.+",
+              "description": "Where the weights come from. s3:// and hf:// are fetched by the KServe storage-initializer initContainer into an emptyDir at /mnt/models; oci:// is a ModelCar image; pvc:// mounts a pre-populated volume. For a ModelCar the runtime image goes in `image`."
+            },
+            "externalSecretKey": {
+              "type": "string",
+              "description": "Name of this model's secret inside the profile's Vault basePath folder. Defaults to the model name."
+            },
+            "storageProfile": {
+              "type": "string",
+              "description": "Name of a storage.s3[] profile. Required for an s3:// modelUri unless serviceAccountName is set — KServe resolves credentials only via the pod ServiceAccount."
+            },
+            "serviceAccountName": {
+              "type": "string",
+              "description": "Pod ServiceAccount, for a ServiceAccount you manage outside this chart. Overrides the one derived from storageProfile."
+            },
+            "persistence": { "$ref": "#/definitions/persistence" },
+            "storageInitializer": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Set false for ModelCar or weightless simulator models to skip the download step."
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Resource overrides for the storage-initializer initContainer. Set ephemeral-storage limits large enough for the full model, or the pod is evicted mid-download."
+                }
+              },
+              "additionalProperties": false
+            },
+            "modelName": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Model identity clients send in the OpenAI `model` field."
+            },
+            "image": {
+              "type": "string",
+              "description": "vLLM runtime image. Must contain the vllm binary — a ModelCar image will not work here."
+            },
+            "imagePullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            },
+            "replicas": { "type": "integer", "minimum": 0 },
+            "env": { "type": "array" },
+            "resources": { "type": "object" },
+            "nodeSelector": { "type": "object" },
+            "tolerations": { "type": "array" },
+            "affinity": { "type": "object" },
+            "readinessProbe": { "type": "object" },
+            "livenessProbe": { "type": "object" },
+            "podSecurityContext": { "type": "object" },
+            "securityContext": { "type": "object" },
+            "imagePullSecrets": { "type": "array" },
+            "gateway": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "namespace": { "type": "string" }
+              }
+            },
+            "parallelism": { "type": "object" },
+            "worker": { "type": "object" },
+            "scheduler": { "type": "object" },
+            "annotations": { "type": "object" },
+            "extraSpec": {
+              "type": "object",
+              "description": "Escape hatch merged over the generated LLMInferenceService spec."
+            }
+          }
+        },
+        "external": {
+          "type": "object",
+          "description": "ExternalModel backend settings.",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": ["openai", "anthropic", "azure-openai", "vertex", "bedrock-openai"]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9._-]+$",
+              "description": "Bare FQDN — no scheme, no path."
+            },
+            "targetModel": { "type": "string", "minLength": 1 },
+            "tls": { "type": "boolean" },
+            "allowInsecureCredentials": {
+              "type": "boolean",
+              "description": "Required acknowledgement when tls is false and a credential is attached: the API key crosses the network in cleartext."
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" },
+            "credentials": {
+              "type": "object",
+              "properties": {
+                "secretName": { "type": "string" },
+                "create": { "type": "boolean" },
+                "key": { "type": "string" },
+                "apiKey": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "accessPolicy": {
+      "type": "object",
+      "required": ["name", "subjects"],
+      "properties": {
+        "name": { "$ref": "#/definitions/dns1123" },
+        "enabled": { "type": "boolean" },
+        "displayName": { "type": "string" },
+        "description": { "type": "string" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" },
+        "modelSelector": { "$ref": "#/definitions/modelSelector" },
+        "subjects": {
+          "type": "object",
+          "description": "At least one of groups or users must be non-empty.",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } },
+            "users": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "meteringMetadata": {
+          "type": "object",
+          "properties": {
+            "organizationId": { "type": "string" },
+            "costCenter": { "type": "string" },
+            "labels": { "type": "object" }
+          }
+        }
+      }
+    },
+
+    "subscription": {
+      "type": "object",
+      "required": ["name", "owner"],
+      "properties": {
+        "name": { "$ref": "#/definitions/dns1123" },
+        "enabled": { "type": "boolean" },
+        "displayName": { "type": "string" },
+        "description": { "type": "string" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" },
+        "priority": {
+          "type": "integer",
+          "description": "Highest priority wins when a caller is covered by several subscriptions."
+        },
+        "owner": {
+          "type": "object",
+          "description": "At least one of groups or users must be non-empty.",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } },
+            "users": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "modelSelector": { "$ref": "#/definitions/modelSelector" },
+        "tokenRateLimits": { "$ref": "#/definitions/tokenRateLimits" },
+        "billingRate": { "type": "object" },
+        "tokenMetadata": { "type": "object" },
+        "perModel": {
+          "type": "object",
+          "description": "Per-model overrides keyed by model name.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "tokenRateLimits": { "$ref": "#/definitions/tokenRateLimits" },
+              "billingRate": { "type": "object" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,188 @@
+# =============================================================================
+# SANDBOX environment
+# =============================================================================
+# Purpose: let application teams try models with minimal friction.
+# Posture: broad access (system:authenticated), small quotas, cheap CPU models,
+#          inline secrets tolerated.
+# =============================================================================
+
+environment: sandbox
+
+global:
+  tenantNamespace: models-as-a-service
+  modelNamespace: llm-sandbox
+  gateway:
+    name: maas-default-gateway
+    namespace: openshift-ingress
+  imagePullSecrets:
+    - name: redhat-registry
+
+namespaces:
+  create: false
+
+argocd:
+  enabled: true
+  syncOptions:
+    # LLMInferenceService specs are large; server-side apply avoids the
+    # last-applied-configuration annotation size limit.
+    - ServerSideApply=true
+
+modelDefaults:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "1"
+      memory: 6Gi
+    limits:
+      cpu: "2"
+      memory: 12Gi
+
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+models:
+  # --- CPU simulator: no weights, no GPU. Use it to validate the *plumbing*
+  #     (gateway, auth, quota) without waiting for a model to load.
+  - name: simulator
+    enabled: true
+    backend: LLMInferenceService
+    tier: free
+    catalog:
+      displayName: "Simulator (test only)"
+      description: "Mock inference service. Returns canned responses; validates auth, routing and quota end to end."
+      genaiUseCase: chat
+      contextWindow: 2048
+      capabilities: ["text-generation"]
+    inference:
+      modelUri: hf://facebook/opt-125m
+      modelName: facebook/opt-125m-simulated
+      replicas: 1
+      resources:
+        requests:
+          cpu: "200m"
+          memory: 1Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      # The simulator starts in seconds, not minutes — tighten the probes.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTPS
+        initialDelaySeconds: 20
+        periodSeconds: 10
+        failureThreshold: 12
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTPS
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        failureThreshold: 5
+
+  # --- Small real model on CPU. Slow, but proves the vLLM runtime path.
+  - name: granite-3-1-8b
+    enabled: true
+    backend: LLMInferenceService
+    tier: free
+    catalog:
+      displayName: "Granite 3.1 8B Instruct"
+      description: "IBM Granite 3.1 8B, instruction tuned. CPU inference in sandbox — expect slow first tokens."
+      genaiUseCase: chat
+      contextWindow: 4096
+      capabilities: ["text-generation", "chat"]
+    inference:
+      modelUri: oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-starter-v1:1.4
+      modelName: ibm-granite/granite-3.1-8b-instruct
+      # ModelCar carries the *weights*. The container image must be a vLLM
+      # runtime that has the `vllm` binary on PATH — these are not the same thing.
+      image: registry.redhat.io/rhaiis/vllm-cpu-rhel9:3.3.0
+      replicas: 1
+      env:
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "3"
+        - name: VLLM_ADDITIONAL_ARGS
+          value: "--max-model-len 4096"
+      resources:
+        requests:
+          cpu: "3"
+          memory: 16Gi
+        limits:
+          cpu: "6"
+          memory: 24Gi
+
+  # --- External provider, kept off by default. Turn on only with a real Secret.
+  - name: gpt-4o
+    enabled: false
+    backend: ExternalModel
+    tier: premium
+    catalog:
+      displayName: "OpenAI GPT-4o"
+      description: "External OpenAI model, governed by the same MaaS auth and quotas as on-cluster models."
+      genaiUseCase: chat
+      contextWindow: 128000
+      capabilities: ["text-generation", "chat", "image-text-inferencing"]
+    external:
+      provider: openai
+      endpoint: api.openai.com
+      targetModel: gpt-4o
+      tls: true
+      port: 443
+      credentials:
+        # Pre-create this Secret, or manage it with External Secrets Operator.
+        secretName: openai-credentials
+
+# -----------------------------------------------------------------------------
+# Access — who may call what
+# -----------------------------------------------------------------------------
+accessPolicies:
+  - name: sandbox-open-access
+    enabled: true
+    displayName: "Sandbox open access"
+    description: "Any authenticated OpenShift user may call any sandbox model."
+    modelSelector:
+      all: true
+    subjects:
+      groups:
+        - "system:authenticated"
+    meteringMetadata:
+      costCenter: "cc-sandbox"
+      labels:
+        environment: sandbox
+
+# -----------------------------------------------------------------------------
+# Quotas — deliberately small. Sandbox is for trying, not for load testing.
+# -----------------------------------------------------------------------------
+subscriptions:
+  - name: sandbox-plan
+    enabled: true
+    displayName: "Sandbox plan"
+    description: "10k tokens/hour per model for all authenticated users."
+    priority: 0
+    owner:
+      groups:
+        - "system:authenticated"
+    modelSelector:
+      all: true
+    tokenRateLimits:
+      - limit: 10000
+        window: 1h
+      # Burst guard so one runaway loop cannot drain the hourly budget in a minute.
+      - limit: 2000
+        window: 1m
+
+observability:
+  inventory:
+    enabled: true
+  customResourceStateMetrics:
+    enabled: false
+  prometheusRule:
+    enabled: false
+
+validation:
+  requireAccessPolicy: true
+  requireSubscription: true
+  # Sandbox tolerates an inline key for a quick experiment.
+  forbidInlineSecrets: false

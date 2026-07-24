@@ -1,0 +1,91 @@
+{{- $root := . -}}
+{{- $models := (include "maas-models.enabledModels" $root | fromJsonArray) -}}
+==============================================================================
+ maas-models — environment: {{ .Values.environment }}   (chart {{ .Chart.Version }})
+==============================================================================
+
+Managed models: {{ len $models }}   Tenant namespace: {{ .Values.global.tenantNamespace }}
+Gateway:        {{ .Values.global.gateway.name }} ({{ .Values.global.gateway.namespace }})
+
+{{ range $m := $models -}}
+  - {{ printf "%-28s" $m.name }} tier={{ printf "%-10s" ($m.tier | default "default") }} backend={{ $m.backend | default "LLMInferenceService" }} ns={{ include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+{{ end }}
+------------------------------------------------------------------------------
+ CHECK HEALTH
+------------------------------------------------------------------------------
+
+ 1. Catalog view — the single most useful command. `Ready` means the backend is
+    serving AND governance (auth + quota) is attached:
+
+      oc get maasmodelref -A -l maas.pase52.io/environment={{ .Values.environment }}
+
+    Columns: PHASE  ENDPOINT  HTTPROUTE  GATEWAY
+
+ 2. Anything not Ready — with the reason:
+
+      oc get maasmodelref -A -l maas.pase52.io/environment={{ .Values.environment }} \
+        -o jsonpath='{range .items[?(@.status.phase!="Ready")]}{.metadata.namespace}/{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+
+    Phase meanings:
+      Ready      backend healthy + governance attached  -> serving
+      Pending    backend still starting, OR no MaaSAuthPolicy/MaaSSubscription pair
+      Unhealthy  governance fine, backend runtime failing  -> live outage
+      Failed     unrecoverable reconcile error
+      Invalid    bad spec (should not happen: this chart validates at render time)
+
+ 3. Governance objects:
+
+      oc get maasauthpolicy,maassubscription -n {{ .Values.global.tenantNamespace }} \
+        -l maas.pase52.io/environment={{ .Values.environment }}
+
+ 4. Workload pods for a single model:
+
+      oc get pods -n <model-namespace> -l maas.pase52.io/model=<model-name>
+
+ 5. Smoke test through the gateway (proves auth + routing + quota together):
+
+      TOKEN=$(oc whoami -t)
+      MAAS=$(oc get route maas-api-route -n {{ .Values.global.tenantNamespace }} -o jsonpath='{.spec.host}')
+      curl -sS -H "Authorization: Bearer $TOKEN" https://$MAAS/v1/models | jq '.data[] | {id, ready, url}'
+
+------------------------------------------------------------------------------
+ ARGO CD
+------------------------------------------------------------------------------
+{{ if .Values.argocd.enabled }}
+ Sync waves are ON. Resources converge in this order:
+   wave {{ .Values.argocd.syncWaves.workload }}   LLMInferenceService / ExternalModel
+   wave {{ .Values.argocd.syncWaves.modelRef }}  MaaSModelRef + MaaSAuthPolicy + MaaSSubscription
+
+ MaaSModelRef and the governance objects share a wave on purpose: each only
+ becomes healthy once the other exists. Splitting them deadlocks the sync.
+
+ Wave {{ .Values.argocd.syncWaves.workload }} completes only when the models have actually loaded. A large
+ GPU model can hold the sync in Progressing for 10-20 minutes on first deploy —
+ that is the health check doing its job, not a stuck sync.
+
+ Install the custom health checks from the `maas-gitops` chart, otherwise Argo CD
+ treats these CRDs as unknown kinds and reports them Healthy the moment they are
+ created — whether or not the model ever serves a request.
+{{- else }}
+ Sync-wave annotations are DISABLED (argocd.enabled=false). Argo CD will apply
+ all objects at once; MaaSModelRef may report Pending until the backend appears.
+{{- end }}
+
+{{- $noAP := list -}}
+{{- $noSub := list -}}
+{{- range $m := $models -}}
+  {{- if ne (include "maas-models.hasAccessPolicy" (dict "root" $root "model" $m)) "true" -}}{{- $noAP = append $noAP $m.name -}}{{- end -}}
+  {{- if ne (include "maas-models.hasSubscription" (dict "root" $root "model" $m)) "true" -}}{{- $noSub = append $noSub $m.name -}}{{- end -}}
+{{- end }}
+{{- if or $noAP $noSub }}
+
+------------------------------------------------------------------------------
+ !! WARNING — models without governance will never reach phase=Ready
+------------------------------------------------------------------------------
+{{- with $noAP }}
+ No MaaSAuthPolicy (every request will be denied): {{ join ", " . }}
+{{- end }}
+{{- with $noSub }}
+ No MaaSSubscription (no token quota):             {{ join ", " . }}
+{{- end }}
+{{- end }}

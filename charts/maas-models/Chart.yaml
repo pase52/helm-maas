@@ -1,0 +1,40 @@
+apiVersion: v2
+name: maas-models
+description: Declarative lifecycle management of Models-as-a-Service (MaaS) models on Red Hat OpenShift AI
+type: application
+
+# Chart version — bump on every change to the chart itself.
+version: 1.0.0
+
+# Version of the platform this chart is validated against (Red Hat OpenShift AI).
+appVersion: "3.4"
+
+# MaaS requires OpenShift 4.19.9+ (Kubernetes 1.32+) for Gateway API GA.
+kubeVersion: ">=1.32.0-0"
+
+keywords:
+  - openshift
+  - openshift-ai
+  - rhoai
+  - models-as-a-service
+  - maas
+  - kserve
+  - llm
+  - vllm
+  - gitops
+  - argocd
+
+home: https://github.com/pase52/helm-maas
+sources:
+  - https://github.com/pase52/helm-maas
+  - https://github.com/opendatahub-io/models-as-a-service
+
+maintainers:
+  - name: Platform Engineering
+
+annotations:
+  # Red Hat Helm chart certification metadata.
+  charts.openshift.io/name: MaaS Models
+  charts.openshift.io/provider: Platform Engineering
+  charts.openshift.io/supportURL: https://github.com/pase52/helm-maas/issues
+  charts.openshift.io/providerType: community

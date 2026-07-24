@@ -1,0 +1,127 @@
+{{/*
+kube-state-metrics CustomResourceState configuration.
+
+Teaches kube-state-metrics to export the MaaS CRD phases as Prometheus metrics,
+which is what turns `status.phase` into something you can alert and graph on:
+
+    maas_model_phase{namespace, name, phase}          0|1  (StateSet)
+    maas_authpolicy_phase{namespace, name, phase}     0|1
+    maas_subscription_phase{namespace, name, phase}   0|1
+    maas_externalmodel_phase{namespace, name, phase}  0|1
+
+This ConfigMap on its own does nothing. A cluster admin must mount it into a
+kube-state-metrics instance and start it with
+`--custom-resource-state-config-file=/etc/ksm/crs.yaml`, and that instance needs
+RBAC to list/watch the maas.opendatahub.io group. See docs/HEALTH.md.
+
+Rendering it here keeps the metric definitions versioned alongside the models
+they describe, so the alerts and the CRDs cannot drift apart.
+*/}}
+{{- if .Values.observability.customResourceStateMetrics.enabled }}
+{{- $root := . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-crs-metrics
+  namespace: {{ .Values.observability.customResourceStateMetrics.namespace | default .Values.global.tenantNamespace }}
+  {{- include "maas-models.metadata" (dict "root" $root "component" "metrics-config" "wave" "observability") | nindent 2 }}
+data:
+  crs.yaml: |
+    kind: CustomResourceStateMetrics
+    spec:
+      resources:
+        - groupVersionKind:
+            group: maas.opendatahub.io
+            version: v1alpha1
+            kind: MaaSModelRef
+          metricNamePrefix: maas_model
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: phase
+              help: "Current phase of the MaaSModelRef"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: phase
+                  path: [status, phase]
+                  list: [Pending, Ready, Unhealthy, Failed, Invalid]
+            - name: info
+              help: "Static information about the MaaSModelRef"
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    endpoint: [status, endpoint]
+                    backend: [spec, modelRef, kind]
+                    gateway: [status, httpRouteGatewayName]
+            - name: created
+              help: "Unix creation timestamp of the MaaSModelRef"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
+
+        - groupVersionKind:
+            group: maas.opendatahub.io
+            version: v1alpha1
+            kind: MaaSAuthPolicy
+          metricNamePrefix: maas_authpolicy
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: phase
+              help: "Current phase of the MaaSAuthPolicy"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: phase
+                  path: [status, phase]
+                  list: [Pending, Active, Degraded, Failed, Invalid]
+
+        - groupVersionKind:
+            group: maas.opendatahub.io
+            version: v1alpha1
+            kind: MaaSSubscription
+          metricNamePrefix: maas_subscription
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: phase
+              help: "Current phase of the MaaSSubscription"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: phase
+                  path: [status, phase]
+                  list: [Pending, Active, Degraded, Failed, Invalid]
+
+        - groupVersionKind:
+            group: maas.opendatahub.io
+            version: v1alpha1
+            kind: ExternalModel
+          metricNamePrefix: maas_externalmodel
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: phase
+              help: "Current phase of the ExternalModel"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: phase
+                  path: [status, phase]
+                  list: [Pending, Ready, Failed]
+            - name: info
+              help: "Provider information for the ExternalModel"
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    provider: [spec, provider]
+                    target_model: [spec, targetModel]
+{{- end }}

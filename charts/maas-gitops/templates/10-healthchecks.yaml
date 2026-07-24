@@ -1,0 +1,77 @@
+{{- if .Values.healthChecks.enabled }}
+{{- $root := . -}}
+
+{{- if .Values.healthChecks.configMap.enabled }}
+{{/*
+Artifact ConfigMap. Holds the exact patch to apply to the ArgoCD custom
+resource. Keeping it in git means the health logic is reviewed like any other
+code and the applied state can be diffed against the intended state.
+Apply with the command printed in NOTES.txt.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-argocd-health-checks
+  namespace: {{ .Values.healthChecks.configMap.namespace | default .Values.argocd.namespace }}
+  labels:
+    {{- include "maas-gitops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: health-checks
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    maas.pase52.io/target-argocd-instance: {{ .Values.argocd.instanceName | quote }}
+data:
+  README: |
+    Custom Argo CD health checks for the MaaS CRDs.
+
+    Without these, Argo CD treats MaaSModelRef / MaaSAuthPolicy / MaaSSubscription
+    / ExternalModel / LLMInferenceService as unknown kinds and reports them
+    Healthy as soon as they exist — a permanently broken model shows a green tick.
+
+    Apply to the ArgoCD instance {{ .Values.argocd.instanceName }}:
+
+      oc get cm {{ .Release.Name }}-argocd-health-checks \
+        -n {{ .Values.healthChecks.configMap.namespace | default .Values.argocd.namespace }} \
+        -o jsonpath='{.data.patch\.yaml}' > /tmp/maas-health.yaml
+
+      oc patch argocd {{ .Values.argocd.instanceName }} -n {{ .Values.argocd.namespace }} \
+        --type merge --patch-file /tmp/maas-health.yaml
+
+    The operator restarts the application controller; health re-evaluates within
+    a minute. Verify:
+
+      oc get argocd {{ .Values.argocd.instanceName }} -n {{ .Values.argocd.namespace }} \
+        -o jsonpath='{range .spec.resourceHealthChecks[*]}{.group}/{.kind}{"\n"}{end}'
+
+  patch.yaml: |
+    spec:
+      resourceHealthChecks:
+        {{- include "maas-gitops.resourceHealthChecks" $root | nindent 8 }}
+{{- end }}
+
+{{- if .Values.healthChecks.argocdResource.enabled }}
+{{- if .Values.healthChecks.configMap.enabled }}
+---
+{{- end }}
+{{/*
+Partial ArgoCD CR carrying only spec.resourceHealthChecks.
+Use when the GitOps instance is itself managed by GitOps. Applying this
+REPLACES the instance's resourceHealthChecks list — fold in any checks you
+already rely on before enabling.
+*/}}
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: {{ .Values.argocd.instanceName }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "maas-gitops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: health-checks
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    # Only reconcile the fields declared here; leave the rest of the instance alone.
+    argocd.argoproj.io/sync-options: "ServerSideApply=true"
+spec:
+  resourceHealthChecks:
+    {{- include "maas-gitops.resourceHealthChecks" $root | nindent 4 }}
+{{- end }}
+{{- end }}

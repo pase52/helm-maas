@@ -1,0 +1,71 @@
+{{/*
+Per-model PersistentVolumeClaim for downloaded weights.
+
+KServe mounts an emptyDir at /mnt/models by default, putting the weights on node
+ephemeral storage. Its AddModelMount only creates that emptyDir when no volume of
+the same name already exists on the pod, so declaring one (see the
+LLMInferenceService template) substitutes this claim instead.
+
+Created in the same namespace as the model, one claim per model — a shared claim
+would mean several storage-initializers writing the same paths concurrently.
+*/}}
+{{- $root := . -}}
+{{- range $m := (include "maas-models.enabledModels" $root | fromJsonArray) }}
+{{- if eq ($m.backend | default "LLMInferenceService") "LLMInferenceService" }}
+{{- $p := (include "maas-models.persistence" (dict "root" $root "model" $m) | fromJson) }}
+{{/* Nothing to create when disabled, or when pointed at a claim someone else owns. */}}
+{{- if and $p.enabled (not $p.existingClaim) }}
+{{- $ns := include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+{{- $ann := dict }}
+{{- $syncOptions := list }}
+{{- if ne $p.retain false }}
+{{/*
+Retaining is the default: re-provisioning and re-downloading a large model is
+expensive, and losing a bound claim to an accidental prune is worse. Two
+mechanisms are needed — one for `helm uninstall`, one for Argo CD.
+
+Prune=false goes through `syncOptions` so it merges into the single
+sync-options annotation. Setting the annotation directly here would emit a
+second copy of a key the metadata helper already writes, and a duplicate key is
+rejected by the API server while rendering perfectly cleanly.
+*/}}
+{{- $_ := set $ann "helm.sh/resource-policy" "keep" }}
+{{- $syncOptions = append $syncOptions "Prune=false" }}
+{{- end }}
+{{- $ann = merge $ann ($p.annotations | default dict) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "maas-models.pvcName" (dict "root" $root "model" $m) }}
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "model" $m
+        "component" "model-storage"
+        "wave" "secret"
+        "annotations" $ann
+        "syncOptions" $syncOptions
+        "extraLabels" ($p.labels | default dict)) | nindent 2 }}
+spec:
+  accessModes:
+    {{- toYaml ($p.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  volumeMode: {{ $p.volumeMode | default "Filesystem" }}
+  resources:
+    requests:
+      storage: {{ $p.size | quote }}
+  {{- if $p.storageClassName }}
+  {{/*
+  "-" is the Kubernetes convention for "no dynamic provisioning": it binds only
+  to a matching pre-created PV. It is rendered as an empty string, which is not
+  the same as omitting the field — omitting it selects the default StorageClass.
+  */}}
+  storageClassName: {{ if eq $p.storageClassName "-" }}""{{ else }}{{ $p.storageClassName | quote }}{{ end }}
+  {{- end }}
+  {{- with $p.selector }}
+  selector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

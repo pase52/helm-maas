@@ -1,0 +1,54 @@
+{{/*
+MaaSModelRef — publishes a backend into the MaaS catalog.
+
+This is the object the DevOps team watches. maas-controller reconciles it and
+reports, in one place:
+  status.phase       Pending | Ready | Unhealthy | Failed | Invalid
+  status.endpoint    the externally reachable URL
+  conditions:
+    RuntimeReady         backend is up and serving
+    GovernanceAttached   an active MaaSSubscription + MaaSAuthPolicy pair exists
+    Ready                both of the above
+
+The catalog annotations below are returned verbatim in `GET /v1/models` under
+`modelDetails`, so they are what application teams actually see.
+
+Lives in the same namespace as its backend — this is a hard requirement of the CRD.
+*/}}
+{{- $root := . -}}
+{{- range $m := (include "maas-models.enabledModels" $root | fromJsonArray) }}
+{{- $cat := $m.catalog | default dict }}
+{{- $ns := include "maas-models.modelNamespace" (dict "root" $root "model" $m) }}
+{{- $ann := dict }}
+{{- $_ := set $ann "openshift.io/display-name" ($cat.displayName | default $m.name) }}
+{{- with $cat.description }}{{- $_ := set $ann "openshift.io/description" . }}{{- end }}
+{{- with $cat.genaiUseCase }}{{- $_ := set $ann "opendatahub.io/genai-use-case" . }}{{- end }}
+{{- with $cat.contextWindow }}{{- $_ := set $ann "opendatahub.io/context-window" (. | toString) }}{{- end }}
+{{- with $cat.capabilities }}{{- $_ := set $ann "opendatahub.io/model-capabilities" (. | toJson) }}{{- end }}
+{{- $ann = merge $ann ($cat.annotations | default dict) }}
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: {{ $m.name }}
+  namespace: {{ $ns }}
+  {{- include "maas-models.metadata" (dict
+        "root" $root
+        "model" $m
+        "component" "model-ref"
+        "wave" "modelRef"
+        "annotations" $ann
+        "extraLabels" ($m.labels | default dict)) | nindent 2 }}
+spec:
+  modelRef:
+    kind: {{ $m.backend | default "LLMInferenceService" }}
+    name: {{ $m.name }}
+  {{- with $m.endpointOverride }}
+  {{/* Set this only when the controller resolves the wrong gateway hostname. */}}
+  endpointOverride: {{ . | quote }}
+  {{- end }}
+  {{- with $m.tenantRef }}
+  {{/* Multi-tenant clusters only. Omit to use the default tenant. */}}
+  tenantRef: {{ . | quote }}
+  {{- end }}
+{{- end }}

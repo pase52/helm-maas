@@ -1,0 +1,271 @@
+# =============================================================================
+# maas-gitops — Argo CD wiring for MaaS model management
+# =============================================================================
+# Three separable pieces, each independently toggleable:
+#
+#   1. healthChecks  — teaches Argo CD to read MaaS CRD status. Without this,
+#                      Argo CD reports every MaaSModelRef "Healthy" the instant
+#                      it is created, whether or not the model ever serves.
+#                      This is the piece that gives the DevOps team the head-up view.
+#   2. appProject    — the AppProject that scopes what these Applications may touch.
+#   3. applications  — one Argo CD Application per environment.
+#
+# Auto-sync is OFF and cascade deletion is OFF by default, per operating policy:
+# ops drive the syncs. Everything remains configurable below.
+# =============================================================================
+
+argocd:
+  # -- Namespace of the Argo CD / OpenShift GitOps instance.
+  namespace: openshift-gitops
+
+  # -- Name of the ArgoCD custom resource managed by the OpenShift GitOps operator.
+  # Used to target the health-check patch.
+  instanceName: openshift-gitops
+
+# -----------------------------------------------------------------------------
+# healthChecks — custom Lua health assessment for the MaaS CRDs.
+# -----------------------------------------------------------------------------
+# Argo CD assumes any CRD it does not recognise is Healthy. That turns a
+# permanently broken model into a green tick. These checks read status.phase and
+# the RuntimeReady / GovernanceAttached conditions and map them onto Argo CD's
+# Healthy / Progressing / Degraded states.
+#
+# DELIVERY — the OpenShift GitOps operator owns argocd-cm, so writing health
+# checks there directly gets reverted. Two supported paths:
+#
+#   configMap.enabled=true  (default)  Renders the patch as a ConfigMap artifact
+#                                      plus the exact `oc patch` command in NOTES.
+#                                      Safe everywhere; one manual admin step.
+#
+#   argocdResource.enabled=true        Renders a partial ArgoCD CR carrying only
+#                                      spec.resourceHealthChecks. Use when the
+#                                      GitOps instance itself is managed in git.
+#                                      Do not enable both paths for one instance.
+healthChecks:
+  enabled: true
+
+  configMap:
+    enabled: true
+    # -- Namespace for the artifact ConfigMap. Defaults to argocd.namespace.
+    namespace: ""
+
+  argocdResource:
+    enabled: false
+
+  # -- Which kinds to generate checks for. Turn one off if you already manage it.
+  kinds:
+    maasModelRef: true
+    maasAuthPolicy: true
+    maasSubscription: true
+    externalModel: true
+    # LLMInferenceService gates the sync on the model actually loading.
+    # Turning this off makes syncs finish fast but stops telling you whether the
+    # workload came up.
+    llmInferenceService: true
+
+# -----------------------------------------------------------------------------
+# appProject — scopes what the model Applications are permitted to do.
+# -----------------------------------------------------------------------------
+appProject:
+  enabled: true
+  name: maas-models
+  description: "Models-as-a-Service model lifecycle"
+
+  # -- Git repositories these Applications may deploy from.
+  sourceRepos:
+    - https://github.com/pase52/helm-maas.git
+
+  # -- Namespaces the Applications may write to. Keep this tight — it is the
+  # blast-radius boundary for a bad values.yaml.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: models-as-a-service
+    - server: https://kubernetes.default.svc
+      namespace: llm-sandbox
+    - server: https://kubernetes.default.svc
+      namespace: llm-prod
+
+  # -- Cluster-scoped resources the project may manage. Empty by default: this
+  # chart's models are entirely namespace-scoped. Add Namespace here only if you
+  # set `namespaces.create=true` in maas-models.
+  clusterResourceWhitelist: []
+  # - group: ""
+  #   kind: Namespace
+
+  # -- Namespaced resources the project may manage. Empty list means "all".
+  namespaceResourceWhitelist: []
+
+  # -- Namespaced resources the project may NOT manage, whatever git says.
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+  # -- Roles/RBAC on the project itself.
+  roles: []
+
+  # -- Sync windows, e.g. block production syncs outside a change window.
+  syncWindows: []
+  # - kind: deny
+  #   schedule: "0 0 * * *"
+  #   duration: 24h
+  #   applications: ["maas-models-prod"]
+  #   manualSync: true      # ops can still sync by hand
+
+  # -- Signature keys required on commits (GPG). Empty means unsigned allowed.
+  signatureKeys: []
+
+  # -- Orphaned resource monitoring: surfaces objects in the destination
+  # namespaces that git does not know about. Warn-only; nothing is deleted.
+  orphanedResources:
+    enabled: false
+    warn: true
+
+# -----------------------------------------------------------------------------
+# applications — one Argo CD Application per environment.
+# -----------------------------------------------------------------------------
+# `applicationDefaults` holds the standard Argo CD knobs; each entry in
+# `applications` overrides what it needs. This is where the operating policy
+# (manual sync, no cascade delete) is expressed.
+applicationDefaults:
+  # -- Argo CD namespace the Application object is created in.
+  namespace: ""
+
+  # -- AppProject these Applications belong to. Defaults to `appProject.name`.
+  # Set explicitly when `appProject.enabled: false` and the project is managed
+  # elsewhere — an Application naming a project that does not exist is rejected.
+  project: ""
+
+  # -- Git source.
+  repoURL: https://github.com/pase52/helm-maas.git
+  targetRevision: main
+  path: charts/maas-models
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Namespace the Application is "anchored" to. Resources carry their own
+    # explicit namespaces, so this is mostly bookkeeping.
+    namespace: models-as-a-service
+
+  # -- Helm rendering options.
+  helm:
+    valueFiles: []
+    values: ""
+    parameters: []
+    releaseName: ""
+    # Fail the render if a referenced value file is missing, rather than
+    # silently deploying defaults.
+    ignoreMissingValueFiles: false
+    skipCrds: true
+
+  syncPolicy:
+    # -- AUTO-SYNC. Off by default: ops decide when a model change lands.
+    # Flip `enabled: true` per environment (sandbox is a reasonable candidate).
+    automated:
+      enabled: false
+      # -- Delete resources removed from git. Off: no auto-destroy.
+      prune: false
+      # -- Revert manual cluster edits. Off: lets ops hot-fix an incident
+      # without Argo CD fighting them.
+      selfHeal: false
+      # -- Allow a sync that would leave the Application with zero resources.
+      # Off: an empty render is treated as a mistake, not an instruction.
+      allowEmpty: false
+
+    # -- Sync options applied to the whole Application.
+    syncOptions:
+      # Namespaces are provisioned by the cluster-config repo.
+      - CreateNamespace=false
+      # Large LLMInferenceService specs exceed the annotation size limit that
+      # client-side apply relies on.
+      - ServerSideApply=true
+      # Report resources present in the cluster but absent from git rather than
+      # deleting them.
+      - PruneLast=true
+      # Validate against the live OpenAPI schema.
+      - Validate=true
+      # Keep sync status readable when the controller mutates our objects.
+      - RespectIgnoreDifferences=true
+
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m
+
+  # -- Prune propagation policy when a resource IS deliberately pruned.
+  # foreground | background | orphan
+  prunePropagationPolicy: foreground
+
+  # -- Add `resources-finalizer.argocd.argoproj.io` to the Application.
+  # FALSE by default and deliberately so: with the finalizer, deleting the
+  # Application deletes every model it manages. Ops asked for no auto-destroy —
+  # without it, removing the Application leaves the workloads running.
+  cascadeDeleteFinalizer: false
+
+  # -- Number of past syncs kept for rollback.
+  revisionHistoryLimit: 10
+
+  # -- Fields Argo CD should not diff. KServe and maas-controller both write
+  # defaults back into the specs they manage; without these the Application sits
+  # permanently OutOfSync on fields no human ever set.
+  ignoreDifferences:
+    - group: serving.kserve.io
+      kind: LLMInferenceService
+      jsonPointers:
+        - /spec/template/containers/0/resources/claims
+        - /spec/router/route
+    - group: maas.opendatahub.io
+      kind: MaaSModelRef
+      jsonPointers:
+        - /spec/endpointOverride
+
+  # -- Free-form key/value pairs shown on the Application in the Argo CD UI.
+  info: []
+  # - name: Runbook
+  #   value: https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md
+
+  annotations: {}
+  labels: {}
+
+# -- The environments. Each merges over applicationDefaults.
+applications:
+  - name: maas-models-sandbox
+    enabled: true
+    helm:
+      valueFiles:
+        - ../../environments/sandbox/values.yaml
+    destination:
+      namespace: models-as-a-service
+    info:
+      - name: Environment
+        value: sandbox
+      - name: Runbook
+        value: https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md
+    # Sandbox could reasonably auto-sync. Left off to match the stated policy;
+    # flip these two lines if the team wants it.
+    # syncPolicy:
+    #   automated:
+    #     enabled: true
+    #     prune: false
+    #     selfHeal: false
+
+  - name: maas-models-prod
+    enabled: true
+    helm:
+      valueFiles:
+        - ../../environments/prod/values.yaml
+    destination:
+      namespace: models-as-a-service
+    revisionHistoryLimit: 20
+    info:
+      - name: Environment
+        value: prod
+      - name: Runbook
+        value: https://github.com/pase52/helm-maas/blob/main/docs/HEALTH.md
+      - name: Change policy
+        value: Manual sync only — review the diff before syncing
