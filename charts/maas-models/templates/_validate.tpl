@@ -47,6 +47,57 @@ instead of syncing "Healthy" while a model silently never serves traffic.
     {{- if not $inf.modelName -}}
       {{- fail (printf "models[%s]: LLMInferenceService backend requires `inference.modelName` — this is the model identity clients send in the OpenAI `model` field" $m.name) -}}
     {{- end -}}
+
+    {{/* --- object storage credentials --------------------------------- */}}
+    {{- $si := $inf.storageInitializer | default dict -}}
+    {{- $needsCreds := and (hasPrefix "s3://" $inf.modelUri) (ne $si.enabled false) -}}
+    {{- if $needsCreds -}}
+      {{- $profileName := $inf.storageProfile | default "" -}}
+      {{- if and (not $profileName) (not $inf.serviceAccountName) -}}
+        {{- fail (printf "models[%s]: an s3:// modelUri needs credentials. KServe's storage-initializer reads them only from the Secrets attached to the pod's ServiceAccount, so set `inference.storageProfile` (defined under `storage.s3`) or `inference.serviceAccountName` for a ServiceAccount you manage yourself." $m.name) -}}
+      {{- end -}}
+      {{- if $profileName -}}
+        {{- $found := dict -}}
+        {{- range $p := (($root.Values.storage | default dict).s3 | default list) -}}
+          {{- if eq $p.name $profileName -}}{{- $found = $p -}}{{- end -}}
+        {{- end -}}
+        {{- if not $found.name -}}
+          {{- fail (printf "models[%s]: `inference.storageProfile: %s` does not match any entry in `storage.s3[].name`" $m.name $profileName) -}}
+        {{- end -}}
+        {{- if eq $found.enabled false -}}
+          {{- fail (printf "models[%s]: storage profile %q is disabled, so no ServiceAccount is rendered and the download will fail with a credentials error" $m.name $profileName) -}}
+        {{- end -}}
+        {{/* Exactly one credential source, or the ServiceAccount points at nothing usable. */}}
+        {{- $sources := list -}}
+        {{- if $found.existingSecret -}}{{- $sources = append $sources "existingSecret" -}}{{- end -}}
+        {{- if $found.create -}}{{- $sources = append $sources "create" -}}{{- end -}}
+        {{- if $found.roleArn -}}{{- $sources = append $sources "roleArn" -}}{{- end -}}
+        {{- if empty $sources -}}
+          {{- if ne ($found.useAnonymousCredential | toString) "true" -}}
+            {{- fail (printf "storage.s3[%s]: no credential source. Set one of `existingSecret` (recommended), `create: true` (sandbox only), or `roleArn` (AWS IRSA) — or `useAnonymousCredential: \"true\"` for a public bucket." $profileName) -}}
+          {{- end -}}
+        {{- else if gt (len $sources) 1 -}}
+          {{- fail (printf "storage.s3[%s]: %s are mutually exclusive credential sources — pick one" $profileName (join " and " $sources)) -}}
+        {{- end -}}
+        {{- if and $found.create (not $found.accessKeyId) -}}
+          {{- fail (printf "storage.s3[%s]: `create: true` but `accessKeyId` is empty" $profileName) -}}
+        {{- end -}}
+        {{- if and $v.forbidInlineSecrets $found.create -}}
+          {{- fail (printf "storage.s3[%s]: `create: true` writes the S3 access key into git, which validation.forbidInlineSecrets forbids in this environment. Use `existingSecret` with an ESO/Sealed Secret, or `roleArn` for IRSA." $profileName) -}}
+        {{- end -}}
+        {{/*
+        A referenced Secret must carry the S3 annotations or the initContainer
+        gets keys with no endpoint or region. The chart can apply them, but only
+        if asked — silently patching a Secret it does not own would be worse.
+        */}}
+        {{- if and $found.existingSecret (not $found.annotateExistingSecret) -}}
+          {{- if or $found.endpoint $found.region -}}
+            {{- fail (printf "storage.s3[%s]: `endpoint`/`region` are set but `annotateExistingSecret` is false, so they would never reach the storage-initializer — KServe reads S3 settings from the Secret's annotations. Set `annotateExistingSecret: true` to have the chart apply them, or put them on %s yourself and remove them here." $profileName $found.existingSecret) -}}
+          {{- end -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+
   {{- else -}}
     {{- $ext := $m.external | default dict -}}
     {{- if not $ext.provider -}}

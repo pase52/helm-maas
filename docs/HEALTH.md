@@ -183,6 +183,59 @@ oc logs -n <ns> <pod> -c main --tail=100
 | `OOMKilled` | Model exceeds the memory limit | Raise limits, lower `--max-model-len`, or use a smaller model |
 | Ready but slow first token | Cold start, weights still loading | Expected; raise probe `initialDelaySeconds` if it flaps |
 | `CreateContainerConfigError` | Missing credential Secret (external models) | `oc get secret <name> -n <ns>` |
+| `Init:Error` / `Init:CrashLoopBackOff` | Model download failed | [S3 download failures](#s3-model-download-failures) |
+| `Evicted`, pod restarts mid-startup | Ephemeral storage exhausted by the download | Raise `storageInitializer.resources.requests.ephemeral-storage` above the model size |
+
+---
+
+## S3 model download failures
+
+Models loaded from `s3://` (or `hf://`) are fetched by an **initContainer**
+named `storage-initializer`, so a failure shows as `Init:Error` and the vLLM
+container never starts. Its logs are the whole story:
+
+```bash
+oc logs -n <ns> <pod> -c storage-initializer
+oc get pod -n <ns> <pod> -o jsonpath='{.spec.serviceAccountName}{"\n"}'
+```
+
+| Log message | Cause | Fix |
+|---|---|---|
+| `Unable to locate credentials` / `NoCredentialsError` | The pod's ServiceAccount has no Secret attached | Confirm `serviceAccountName` is set and the SA lists the Secret — see the check below |
+| `EndpointConnectionError`, tries `s3.amazonaws.com` | `s3-endpoint` annotation missing from the **Secret** | Settings live on the Secret, not the SA. Set `annotateExistingSecret: true` |
+| `SSLCertVerificationError` | Self-signed endpoint (MinIO/ODF lab) | `verifySsl: "0"`, or supply `caBundleConfigMap` |
+| `AccessDenied` / `403` | Key lacks `s3:GetObject`/`s3:ListBucket` on the prefix | Fix the bucket policy; verify with `aws s3 ls` using the same key |
+| `NoSuchBucket` / downloads 0 files | Wrong prefix, or missing trailing `/` | `modelUri` must point at the directory holding `config.json` |
+| `No space left on device` | Ephemeral storage too small | Raise `storageInitializer.resources` above the full model size |
+| Very slow, then probe failure | Large model over a slow link | Raise `readinessProbe.initialDelaySeconds` and `failureThreshold` |
+
+Verify the credential chain end to end — all three links must hold:
+
+```bash
+NS=llm-prod; SA=maas-s3-models
+
+# 1. The ServiceAccount references a Secret
+oc get sa $SA -n $NS -o jsonpath='{.secrets[*].name}{"\n"}'
+
+# 2. That Secret carries the keys KServe expects, under these exact names
+oc get secret <secret> -n $NS -o jsonpath='{.data.awsAccessKeyID}' | head -c 8; echo
+oc get secret <secret> -n $NS -o jsonpath='{.data.awsSecretAccessKey}' | head -c 8; echo
+
+# 3. ...and the S3 settings, which KServe reads from the SECRET's annotations
+oc get secret <secret> -n $NS -o jsonpath='{.metadata.annotations}' | tr ',' '\n' | grep s3-
+```
+
+A frequent cause of silent breakage: `annotateExistingSecret: true` without
+`ServerSideApply=true` in the Application's `syncOptions`. A client-side apply
+prunes the externally-managed credential keys, leaving an annotated Secret with
+no data — the initContainer then reports `Unable to locate credentials` on a
+Secret that looks correct in the Argo CD UI.
+
+To confirm what the controller actually injected:
+
+```bash
+oc get pod -n <ns> <pod> -o jsonpath='{range .spec.initContainers[?(@.name=="storage-initializer")]}{.args}{"\n"}{range .env[*]}{.name}={.value}{"\n"}{end}{end}'
+```
 
 ---
 

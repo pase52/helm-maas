@@ -90,6 +90,41 @@ for env_dir in "${ROOT}"/environments/*/; do
     bad "${env}: LLMInferenceService bypassing the gateway" "${gated}/${total_llm} attached"
   fi
 
+  # --- every s3:// model must name a ServiceAccount, and that ServiceAccount
+  # must exist in the same namespace. KServe resolves object-storage credentials
+  # only through the pod ServiceAccount; a missing link fails the download at
+  # runtime with no render-time symptom.
+  s3_bad=""
+  while IFS=$'\t' read -r name ns sa; do
+    [[ -z "${name}" ]] && continue
+    if [[ -z "${sa}" || "${sa}" == "null" ]]; then
+      s3_bad="${s3_bad} ${ns}/${name}(no serviceAccountName)"
+      continue
+    fi
+    # A ServiceAccount this chart does not render is a supported configuration
+    # (inference.serviceAccountName pointing at one the platform team manages),
+    # so this is reported, not failed — but it is worth seeing in a diff,
+    # because the chart cannot verify it exists or carries a usable Secret.
+    if ! yq -e "select(.kind==\"ServiceAccount\" and .metadata.name==\"${sa}\" and .metadata.namespace==\"${ns}\")" "${out}" >/dev/null 2>&1; then
+      printf 'note  %s: %s uses ServiceAccount %s/%s, which this chart does not render — it must already exist and reference an S3 Secret\n' \
+        "${env}" "${name}" "${ns}" "${sa}"
+    fi
+  done < <(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.model.uri | test("^s3://")) | .metadata.name + "\t" + .metadata.namespace + "\t" + (.spec.template.serviceAccountName // "")' "${out}")
+
+  s3_total="$(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.model.uri | test("^s3://")) | .metadata.name' "${out}" | grep -c . || true)"
+  if [[ -z "${s3_bad}" ]]; then
+    ok "${env}: all ${s3_total} s3:// model(s) have a resolvable ServiceAccount"
+  else
+    bad "${env}: s3:// models without usable credentials" "${s3_bad}"
+  fi
+
+  # --- an s3:// model with no ephemeral-storage request on the storage-initializer
+  # gets evicted partway through a large download. Advisory, not fatal.
+  while IFS= read -r name; do
+    [[ -z "${name}" ]] && continue
+    printf 'note  %s: %s has no storage-initializer ephemeral-storage request\n' "${env}" "${name}"
+  done < <(yq -r 'select(.kind=="LLMInferenceService") | select(.spec.model.uri | test("^s3://")) | select([.spec.template.initContainers // [] | .[] | select(.name=="storage-initializer") | .resources.requests["ephemeral-storage"] // empty] | length == 0) | .metadata.name' "${out}")
+
   # --- MaaSModelRef and governance must share a sync wave, or Argo CD deadlocks.
   wave_ref="$(yq -r 'select(.kind=="MaaSModelRef") | .metadata.annotations."argocd.argoproj.io/sync-wave"' "${out}" | sort -u | head -1)"
   wave_gov="$(yq -r 'select(.kind=="MaaSAuthPolicy" or .kind=="MaaSSubscription") | .metadata.annotations."argocd.argoproj.io/sync-wave"' "${out}" | sort -u | head -1)"

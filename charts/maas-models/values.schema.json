@@ -66,6 +66,18 @@
       }
     },
 
+    "storage": {
+      "type": "object",
+      "description": "Credentials for pulling model weights from object storage.",
+      "properties": {
+        "s3": {
+          "type": "array",
+          "description": "Named S3 credential profiles, referenced by inference.storageProfile.",
+          "items": { "$ref": "#/definitions/s3Profile" }
+        }
+      }
+    },
+
     "modelDefaults": { "type": "object" },
 
     "models": {
@@ -149,6 +161,65 @@
       "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
     },
 
+    "s3Profile": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/definitions/dns1123" },
+        "enabled": { "type": "boolean" },
+        "endpoint": {
+          "type": "string",
+          "description": "S3 endpoint. Omit for real AWS S3; set for ODF/MinIO, e.g. s3.openshift-storage.svc:443"
+        },
+        "region": { "type": "string" },
+        "useHttps": {
+          "type": "string",
+          "enum": ["0", "1"],
+          "description": "Passed through to S3_USE_HTTPS. Inferred from the endpoint scheme when unset."
+        },
+        "verifySsl": {
+          "type": "string",
+          "enum": ["0", "1"],
+          "description": "Passed through to S3_VERIFY_SSL."
+        },
+        "useVirtualBucket": { "type": "string" },
+        "useAccelerate": { "type": "string" },
+        "useAnonymousCredential": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Public bucket — no keys needed."
+        },
+        "caBundleConfigMap": { "type": "string" },
+        "existingSecret": {
+          "type": "string",
+          "description": "Secret carrying awsAccessKeyID and awsSecretAccessKey. Mutually exclusive with create and roleArn."
+        },
+        "annotateExistingSecret": {
+          "type": "boolean",
+          "description": "Apply the S3 settings above as annotations on the existing Secret. KServe reads them from the Secret, not the ServiceAccount."
+        },
+        "create": {
+          "type": "boolean",
+          "description": "Render the Secret from accessKeyId/secretAccessKey. Writes the key into git — sandbox only."
+        },
+        "accessKeyId": { "type": "string" },
+        "secretAccessKey": { "type": "string" },
+        "roleArn": {
+          "type": "string",
+          "description": "AWS IRSA role ARN. Annotates the ServiceAccount and skips static keys entirely."
+        },
+        "serviceAccountName": {
+          "type": "string",
+          "description": "Defaults to maas-s3-<name>."
+        },
+        "extraNamespaces": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/namespaceName" }
+        }
+      },
+      "additionalProperties": false
+    },
+
     "modelSelector": {
       "type": "object",
       "description": "Selects models. A model matches if ANY criterion matches. An empty selector matches nothing — it fails closed rather than granting access by accident.",
@@ -216,7 +287,29 @@
             "modelUri": {
               "type": "string",
               "pattern": "^(oci|hf|s3|pvc|gs|https?)://.+",
-              "description": "Where the weights come from. For a ModelCar this is the oci:// image; the runtime image goes in `image`."
+              "description": "Where the weights come from. s3:// and hf:// are fetched by the KServe storage-initializer initContainer into an emptyDir at /mnt/models; oci:// is a ModelCar image; pvc:// mounts a pre-populated volume. For a ModelCar the runtime image goes in `image`."
+            },
+            "storageProfile": {
+              "type": "string",
+              "description": "Name of a storage.s3[] profile. Required for an s3:// modelUri unless serviceAccountName is set — KServe resolves credentials only via the pod ServiceAccount."
+            },
+            "serviceAccountName": {
+              "type": "string",
+              "description": "Pod ServiceAccount, for a ServiceAccount you manage outside this chart. Overrides the one derived from storageProfile."
+            },
+            "storageInitializer": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Set false for ModelCar or weightless simulator models to skip the download step."
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Resource overrides for the storage-initializer initContainer. Set ephemeral-storage limits large enough for the full model, or the pod is evicted mid-download."
+                }
+              },
+              "additionalProperties": false
             },
             "modelName": {
               "type": "string",

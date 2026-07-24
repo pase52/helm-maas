@@ -89,6 +89,23 @@ them from memory:
 | LLMInferenceService gateway ref | `spec.router.gateway.refs[]` (**not** `spec.gateway.refs`) |
 | `MaaSModelRef` namespace | same namespace as its backend — hard CRD requirement |
 | `MaaSAuthPolicy` / `MaaSSubscription` namespace | the tenant namespace (`models-as-a-service` by default) |
+| `LLMInferenceService.spec.template` | a plain `corev1.PodSpec` — supports `serviceAccountName`, `initContainers`, etc. |
+| `spec.storageInitializer.enabled` | `*bool`; nil and true both mean "create it" |
+| storage-initializer mount path | `/mnt/models` (`constants.DefaultModelLocalMountPath`) |
+| storage-initializer volume | emptyDir `kserve-provision-location`, rw in the init container, ro in `main` |
+| S3 credential resolution | IRSA SA annotation → cluster storage-secret annotation (unset by default) → **`serviceAccount.secrets[]`** |
+| S3 Secret data keys | `awsAccessKeyID`, `awsSecretAccessKey` — KServe defaults, do not rename |
+| S3 settings location | annotations on the **Secret** (`serving.kserve.io/s3-*`), not on the SA or the LLMIS |
+
+### Model artifact loading
+
+`modelUri` scheme picks the mechanism. `s3://` and `hf://` get a
+`storage-initializer` **initContainer** (not a sidecar — it runs to completion
+before vLLM starts). `oci://` is a ModelCar with no download. `pvc://` mounts a
+volume. The chart templates none of the initContainer: KServe injects it. The
+chart supplies the ServiceAccount and annotated Secret that make credentials
+resolvable, plus optional `storageInitializer.resources` for ephemeral-storage
+headroom.
 
 ---
 
@@ -126,6 +143,17 @@ not the test.
 6. **`modelUri` is weights; `image` is the runtime.** A ModelCar OCI image in
    `inference.image` fails at startup with `vllm: command not found`. Keep the
    comments that say so.
+
+7. **An `s3://` model needs a ServiceAccount.** KServe resolves object-storage
+   credentials only through the Secrets attached to the pod's ServiceAccount.
+   Rendering an `s3://` model without `serviceAccountName` produces a pod that
+   fails in the initContainer with `Unable to locate credentials`.
+   *Enforced by:* `_validate.tpl` S3 guard and `tests/render.sh` S3 check.
+
+8. **S3 settings belong on the Secret's annotations.** Not the ServiceAccount,
+   not the `LLMInferenceService`. Putting them anywhere else means the
+   initContainer gets keys with no endpoint and silently tries AWS.
+   *Enforced by:* `_validate.tpl` `annotateExistingSecret` guard.
 
 ---
 

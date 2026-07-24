@@ -103,6 +103,80 @@ argocd:
   compareOptions: ""
 
 # -----------------------------------------------------------------------------
+# storage — credentials for pulling model weights from object storage.
+# -----------------------------------------------------------------------------
+# HOW S3 LOADING ACTUALLY WORKS (KServe, not this chart):
+#   A model whose `modelUri` starts with s3:// makes the KServe controller inject
+#   an initContainer named `storage-initializer` into the pod. It is an
+#   initContainer, not a sidecar — it runs to completion before vLLM starts.
+#
+#     initContainer storage-initializer
+#       args:    [<modelUri>, /mnt/models]
+#       mounts:  emptyDir `kserve-provision-location` at /mnt/models  (read-write)
+#         ↓  downloads the whole prefix
+#     container main (vLLM)
+#       mounts:  the same emptyDir at /mnt/models                     (read-only)
+#
+#   The chart does not template any of that — it is created for you. What the
+#   chart must supply is the *credentials*, and KServe only looks for those in
+#   one place: the Secrets attached to the pod's ServiceAccount.
+#
+#   Consequences worth knowing before you size a node:
+#     · The weights land on the node's ephemeral storage, not a PVC. A 140 GB
+#       model needs 140 GB of free ephemeral storage on the node, and it is
+#       re-downloaded on every pod start. For large models, or many replicas,
+#       prefer an OCI ModelCar (`oci://`) or a pre-populated PVC (`pvc://`).
+#     · Download time counts against pod startup, before the readiness probe
+#       first fires. Slow buckets need a larger `readinessProbe.failureThreshold`.
+#
+# Define a credential profile once here, reference it from any number of models
+# with `inference.storageProfile`.
+storage:
+  s3: []
+  # - name: models
+  #   enabled: true
+  #
+  #   # -- S3 connection settings. These are written as annotations on the Secret;
+  #   # KServe turns them into the S3_*/AWS_* env vars the initContainer reads.
+  #   # Values are passed through verbatim, so they are strings, not booleans.
+  #   endpoint: s3.openshift-storage.svc:443   # ODF/MinIO; omit for real AWS S3
+  #   region: us-east-1
+  #   useHttps: "1"            # "1" or "0"; inferred from the endpoint scheme if unset
+  #   verifySsl: "1"           # "0" for a self-signed MinIO in a lab
+  #   useVirtualBucket: ""     # "true" for virtual-host-style addressing
+  #   useAccelerate: ""
+  #   useAnonymousCredential: ""   # "true" for a public bucket — omit the keys entirely
+  #   caBundleConfigMap: ""    # ConfigMap holding a CA bundle for a private endpoint
+  #
+  #   # -- Credential source. Pick exactly one.
+  #   #
+  #   # 1. Reference a Secret you manage (RECOMMENDED for prod).
+  #   #    It must carry the keys `awsAccessKeyID` and `awsSecretAccessKey`, and
+  #   #    the S3 annotations above must be set on it — KServe reads them from
+  #   #    the Secret, not from the ServiceAccount. Set `annotateExistingSecret`
+  #   #    to have the chart apply them for you.
+  #   existingSecret: odf-model-bucket
+  #   annotateExistingSecret: false
+  #
+  #   # 2. Have the chart create the Secret (sandbox only — this puts the key in git).
+  #   create: false
+  #   accessKeyId: ""
+  #   secretAccessKey: ""
+  #
+  #   # 3. AWS IRSA — no static keys at all. Annotates the ServiceAccount with
+  #   #    eks.amazonaws.com/role-arn and skips the Secret entirely.
+  #   roleArn: ""
+  #
+  #   # -- ServiceAccount name. Defaults to `maas-s3-<name>`. The chart creates it
+  #   # in every namespace that has a model using this profile, and links the
+  #   # Secret to it — that linkage is what makes the credentials reachable.
+  #   serviceAccountName: ""
+  #
+  #   # -- Extra namespaces to render the ServiceAccount/Secret into, beyond the
+  #   # ones inferred from `models`. Rarely needed.
+  #   extraNamespaces: []
+
+# -----------------------------------------------------------------------------
 # modelDefaults — inherited by every entry in `models` unless overridden there.
 # This is what keeps a 30-model values file readable.
 # -----------------------------------------------------------------------------

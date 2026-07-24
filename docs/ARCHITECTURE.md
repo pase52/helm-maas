@@ -123,6 +123,71 @@ workload namespace.
 
 ---
 
+## Model artifact loading
+
+`modelUri` selects the mechanism. KServe decides from the scheme; the chart only
+supplies what that mechanism needs.
+
+| Scheme | Mechanism | Chart must supply |
+|---|---|---|
+| `s3://` | `storage-initializer` initContainer downloads to an emptyDir | ServiceAccount + annotated Secret |
+| `hf://` | Same initContainer, Hugging Face token | ServiceAccount + token Secret |
+| `oci://` | ModelCar image mounted directly; no download | `storageInitializer.enabled: false`, pull secret |
+| `pvc://` | Pre-populated PersistentVolumeClaim mounted | The PVC |
+
+For `s3://`:
+
+```
+        initContainer  storage-initializer
+                       args: [s3://bucket/prefix/, /mnt/models]
+                       env:  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                             S3_ENDPOINT, AWS_DEFAULT_REGION, S3_VERIFY_SSL …
+                       mount: kserve-provision-location → /mnt/models  (rw)
+                          │
+                          │  runs to completion, then exits
+                          ▼
+        container      main (vLLM)
+                       mount: kserve-provision-location → /mnt/models  (ro)
+```
+
+It is an **initContainer**, not a sidecar: it finishes before vLLM starts, so
+download failures surface as `Init:Error` rather than a crashing model container,
+and the download time is charged to pod startup before the readiness probe first
+fires.
+
+### How credentials resolve
+
+KServe's credential builder looks in exactly one place, in this order:
+
+1. `eks.amazonaws.com/role-arn` annotation on the ServiceAccount → AWS IRSA
+2. A cluster-wide storage-secret-name annotation, if the platform configured one
+   in `inferenceservice-config` (unset by default — do not depend on it)
+3. **`serviceAccount.secrets[]`** — the dependable path, and what this chart uses
+
+The S3 connection settings (endpoint, region, TLS behaviour) come from
+**annotations on the Secret**, not from the ServiceAccount and not from the
+`LLMInferenceService`. A correctly annotated Secret that no ServiceAccount
+references is invisible; a ServiceAccount referencing an unannotated Secret
+yields credentials with no endpoint. Both halves are required, which is why
+`storage.s3[]` renders them together and `_validate.tpl` refuses a profile that
+has settings but no way to apply them.
+
+Secret keys are KServe's defaults and must not be renamed: `awsAccessKeyID`,
+`awsSecretAccessKey`.
+
+### Operational consequences
+
+- Weights occupy **node ephemeral storage**, not a PVC, and are re-fetched on
+  every pod start. Three replicas of a 140 GB model means three copies and three
+  downloads. `storageInitializer.resources` must request enough
+  `ephemeral-storage` or the kubelet evicts the pod mid-download.
+- For large models or high replica counts, `oci://` (ModelCar, cached by the node
+  image store) or `pvc://` (fetched once, mounted many times) scale better.
+- `storageInitializer.enabled: false` skips the step entirely — required for
+  ModelCars, which already carry the weights, and for weightless simulators.
+
+---
+
 ## Namespace layout
 
 | Namespace | Contents | Set by |

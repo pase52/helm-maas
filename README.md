@@ -218,6 +218,84 @@ is needed. Verify locally, then open the PR:
 > image in `image:` fails at startup with `vllm: command not found`, because a
 > ModelCar contains model artifacts and no vLLM binary.
 
+### Serve a model from an S3 bucket
+
+`modelUri` accepts `s3://`, `hf://`, `oci://` and `pvc://`. For `s3://` and
+`hf://`, KServe injects an **initContainer** called `storage-initializer` that
+downloads the prefix into an `emptyDir` before vLLM starts:
+
+```
+initContainer storage-initializer     args: [s3://bucket/prefix/, /mnt/models]
+    ↓  emptyDir "kserve-provision-location", read-write
+container main (vLLM)                 same volume at /mnt/models, read-only
+```
+
+The chart templates none of that — KServe creates it. What the chart must supply
+is credentials, and KServe looks for them in exactly one place: **the Secrets
+attached to the pod's ServiceAccount.** Define the bucket once:
+
+```yaml
+storage:
+  s3:
+    - name: models
+      endpoint: s3.openshift-storage.svc:443   # omit for real AWS S3
+      region: us-east-1
+      useHttps: "1"
+      verifySsl: "1"
+      existingSecret: odf-model-bucket         # keys: awsAccessKeyID / awsSecretAccessKey
+      annotateExistingSecret: true             # stamps the settings above onto it
+```
+
+then reference it from any number of models:
+
+```yaml
+models:
+  - name: llama-3-3-70b
+    inference:
+      modelUri: s3://maas-models/llama-3.3-70b-instruct/
+      modelName: meta-llama/Llama-3.3-70B-Instruct
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+      storageProfile: models
+      storageInitializer:
+        resources:
+          requests: { ephemeral-storage: 160Gi }
+          limits:   { ephemeral-storage: 200Gi }
+```
+
+The chart renders the `Secret` annotations and a `ServiceAccount` that references
+it, in every namespace that uses the profile, and sets `serviceAccountName` on
+the pod. Credential sources are mutually exclusive — pick one:
+
+| Source | Use |
+|---|---|
+| `existingSecret` | Production. Secret managed by ESO / Sealed Secrets |
+| `create: true` | Sandbox only — writes the access key into git |
+| `roleArn` | AWS IRSA. Annotates the ServiceAccount, no static keys at all |
+| `useAnonymousCredential: "true"` | Public bucket |
+
+Two things to size before you deploy:
+
+- **Ephemeral storage.** The weights land on the node's disk, not a PVC, and are
+  re-downloaded on every pod start. Without an explicit
+  `storageInitializer.resources` request the kubelet evicts the pod partway
+  through a large download. For very large models or many replicas, an
+  `oci://` ModelCar or a pre-populated `pvc://` avoids the repeated transfer
+  entirely.
+- **Readiness probe.** Download time is counted before the first probe fires.
+  Raise `readinessProbe.initialDelaySeconds` and `failureThreshold` accordingly.
+
+`annotateExistingSecret: true` needs `ServerSideApply=true` in the Application's
+`syncOptions` — the chart renders only annotations on that Secret, and a
+client-side apply would prune the credential keys. It is already set in both
+environments here.
+
+For `oci://` ModelCars and the weightless simulator, skip the download step:
+
+```yaml
+      storageInitializer:
+        enabled: false
+```
+
 ### Withdraw a model
 
 Set `enabled: false` rather than deleting the block — the entry stays in git as a

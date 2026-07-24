@@ -42,6 +42,33 @@ so no authentication and no token accounting apply.
 {{- $pullSecrets := $inf.imagePullSecrets | default $root.Values.global.imagePullSecrets -}}
 {{- if $pullSecrets -}}{{- $_ := set $template "imagePullSecrets" $pullSecrets -}}{{- end -}}
 
+{{/*
+ServiceAccount carrying the object-storage credentials. KServe's
+storage-initializer resolves S3 credentials only from the Secrets attached to
+this ServiceAccount — without it, an s3:// modelUri fails to download.
+An explicit `serviceAccountName` wins over the profile's derived name.
+*/}}
+{{- $sa := $inf.serviceAccountName | default "" -}}
+{{- if and (not $sa) $inf.storageProfile -}}
+{{- range $p := (($root.Values.storage | default dict).s3 | default list) -}}
+{{- if eq $p.name $inf.storageProfile -}}
+{{- $sa = $p.serviceAccountName | default (printf "maas-s3-%s" $p.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $sa -}}{{- $_ := set $template "serviceAccountName" $sa -}}{{- end -}}
+
+{{/*
+storage-initializer resource overrides. The controller strips a user-supplied
+initContainer of this name and merges it over the one it generates, so we only
+declare what differs. Large models need the ephemeral-storage headroom to be
+stated explicitly, or the pod is evicted mid-download.
+*/}}
+{{- $si := $inf.storageInitializer | default dict -}}
+{{- if $si.resources -}}
+{{- $_ := set $template "initContainers" (list (dict "name" "storage-initializer" "resources" $si.resources)) -}}
+{{- end -}}
+
 {{/* ---- spec ------------------------------------------------------------ */}}
 {{- $model := dict "uri" (include "maas-models.image" (dict "root" $root "ref" $inf.modelUri)) "name" $inf.modelName -}}
 {{- $spec := dict
@@ -50,6 +77,14 @@ so no authentication and no token accounting apply.
       "router" (dict "route" dict "gateway" (dict "refs" (list (dict "name" $gw.name "namespace" $gw.namespace))))
       "template" $template
 -}}
+{{/*
+Explicitly disabling the storage-initializer is how a ModelCar (oci://) or a
+weightless simulator avoids a pointless download step. `hasKey` rather than
+`default`, because `default` treats false as empty.
+*/}}
+{{- if hasKey $si "enabled" -}}
+{{- $_ := set $spec "storageInitializer" (dict "enabled" $si.enabled) -}}
+{{- end -}}
 {{- with $inf.parallelism }}{{- $_ := set $spec "parallelism" . -}}{{- end -}}
 {{- with $inf.worker }}{{- $_ := set $spec "worker" . -}}{{- end -}}
 {{- with $inf.scheduler }}{{- $_ := set $spec "scheduler" . -}}{{- end -}}

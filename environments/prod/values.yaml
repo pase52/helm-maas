@@ -28,6 +28,26 @@ namespaces:
   # Production namespaces are provisioned by the cluster-config repo, not here.
   create: false
 
+# -----------------------------------------------------------------------------
+# Object storage — credentials for models served from S3/ODF.
+# -----------------------------------------------------------------------------
+storage:
+  s3:
+    - name: models
+      enabled: true
+      # OpenShift Data Foundation's in-cluster S3 endpoint. For real AWS S3,
+      # drop `endpoint` entirely and set only `region`.
+      endpoint: s3.openshift-storage.svc:443
+      region: us-east-1
+      useHttps: "1"
+      verifySsl: "1"
+      # The Secret's *data* is managed by the External Secrets Operator; the
+      # chart only stamps the S3 settings onto it as annotations, which is where
+      # KServe reads them from. Requires ServerSideApply so the ESO-managed keys
+      # are not pruned — already set in this environment's syncOptions.
+      existingSecret: odf-model-bucket
+      annotateExistingSecret: true
+
 argocd:
   enabled: true
   syncOptions:
@@ -109,6 +129,62 @@ models:
           cpu: "8"
           memory: 32Gi
           nvidia.com/gpu: "1"
+
+  # Weights held in the ODF bucket rather than a registry. The KServe
+  # storage-initializer initContainer downloads the whole prefix into an
+  # emptyDir at /mnt/models before vLLM starts.
+  - name: llama-3-3-70b
+    enabled: true
+    backend: LLMInferenceService
+    tier: premium
+    catalog:
+      displayName: "Llama 3.3 70B Instruct"
+      description: "Large context reasoning model. Weights served from the internal ODF bucket."
+      genaiUseCase: chat
+      contextWindow: 32768
+      capabilities: ["text-generation", "chat"]
+    inference:
+      modelUri: s3://maas-models/llama-3.3-70b-instruct/
+      modelName: meta-llama/Llama-3.3-70B-Instruct
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+      storageProfile: models
+      replicas: 2
+      env:
+        - name: VLLM_ADDITIONAL_ARGS
+          value: "--max-model-len 32768 --tensor-parallel-size 4 --dtype bfloat16"
+      storageInitializer:
+        # The weights land on the node's ephemeral storage and are re-downloaded
+        # on every pod start. Without an explicit ephemeral-storage request the
+        # kubelet evicts the pod partway through a 140 GB download.
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+            ephemeral-storage: 160Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            ephemeral-storage: 200Gi
+      resources:
+        requests:
+          cpu: "8"
+          memory: 96Gi
+          nvidia.com/gpu: "4"
+        limits:
+          cpu: "16"
+          memory: 128Gi
+          nvidia.com/gpu: "4"
+      # A 140 GB download over the cluster network takes a while; the default
+      # 30 x 15s readiness window is not enough.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTPS
+        initialDelaySeconds: 600
+        periodSeconds: 30
+        timeoutSeconds: 15
+        failureThreshold: 60
 
   # External frontier model for the teams that have signed off on data egress.
   - name: claude-sonnet
