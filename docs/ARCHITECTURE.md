@@ -37,38 +37,7 @@ curious model server can harvest OpenShift tokens and MaaS API keys.
 
 ## The request path
 
-```
-       client
-         │  Authorization: Bearer <OpenShift token | MaaS API key>
-         ▼
-┌────────────────────────────────────────────────────────────┐
-│ maas-default-gateway   (Gateway API, openshift-ingress)     │
-│  TLS termination                                            │
-└───────────────────────────┬────────────────────────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────────┐
-              │ Authorino  (AuthPolicy)     │
-              │  · validates the credential │──── callback ──▶ maas-api
-              │  · selects the subscription │
-              │  · STRIPS Authorization     │
-              └─────────────┬───────────────┘
-                            │  denied ──▶ 401 / 403
-                            ▼
-              ┌─────────────────────────────┐
-              │ Limitador (TokenRateLimit)  │
-              │  · counts tokens per        │
-              │    subject × model × window │
-              └─────────────┬───────────────┘
-                            │  over quota ──▶ 429
-                            ▼
-              ┌─────────────────────────────┐
-              │ backend                     │
-              │  vLLM pod (LLMInferenceSvc) │
-              │      or                     │
-              │  ServiceEntry ──▶ provider  │  (ExternalModel)
-              └─────────────────────────────┘
-```
+![How a request reaches a model](diagrams/01-request-path.svg)
 
 The `AuthPolicy` and `TokenRateLimitPolicy` objects in that diagram are **not**
 written by these charts. `maas-controller` generates them from the
@@ -125,6 +94,8 @@ workload namespace.
 
 ## Model artifact loading
 
+![Where weights come from and how credentials reach the download](diagrams/04-model-weights.svg)
+
 `modelUri` selects the mechanism. KServe decides from the scheme; the chart only
 supplies what that mechanism needs.
 
@@ -136,19 +107,6 @@ supplies what that mechanism needs.
 | `pvc://` | Pre-populated PersistentVolumeClaim mounted | The PVC |
 
 For `s3://`:
-
-```
-        initContainer  storage-initializer
-                       args: [s3://bucket/prefix/, /mnt/models]
-                       env:  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-                             S3_ENDPOINT, AWS_DEFAULT_REGION, S3_VERIFY_SSL …
-                       mount: kserve-provision-location → /mnt/models  (rw)
-                          │
-                          │  runs to completion, then exits
-                          ▼
-        container      main (vLLM)
-                       mount: kserve-provision-location → /mnt/models  (ro)
-```
 
 It is an **initContainer**, not a sidecar: it finishes before vLLM starts, so
 download failures surface as `Init:Error` rather than a crashing model container,
@@ -291,6 +249,8 @@ its `MaaSModelRef` together.
 
 ## Sync waves and the circular dependency
 
+![Sync waves](diagrams/02-gitops-flow.svg)
+
 ```
 wave -10  Namespace                      (only if namespaces.create=true)
 wave  -5  Secret                         (external model credentials)
@@ -325,6 +285,8 @@ installed, this means a first sync of a large GPU model legitimately sits in
 ---
 
 ## Health model
+
+![Health model](diagrams/03-health-model.svg)
 
 Argo CD assumes any CRD it does not recognise is Healthy. Left alone, it reports
 a green tick for a `MaaSModelRef` that will never serve a request. The Lua health

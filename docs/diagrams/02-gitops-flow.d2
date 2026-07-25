@@ -1,0 +1,138 @@
+# =============================================================================
+# From values.yaml to running models — what Argo CD does, and in what order
+# =============================================================================
+# Render:  d2 --sketch --theme 0 --dark-theme 200 02-gitops-flow.d2 02-gitops-flow.svg
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    sketch: true
+  }
+}
+
+direction: down
+
+classes: {
+  git: {
+    style: {
+      fill: "#f8f0fc"
+      stroke: "#862e9c"
+      stroke-width: 2
+    }
+  }
+  argo: {
+    style: {
+      fill: "#fff4e6"
+      stroke: "#e8590c"
+      stroke-width: 2
+    }
+  }
+  wave: {
+    style: {
+      fill: "#f4fce3"
+      stroke: "#5c940d"
+      stroke-width: 2
+    }
+  }
+  human: {
+    style: {
+      fill: "#fff9db"
+      stroke: "#f08c00"
+      stroke-width: 3
+    }
+  }
+}
+
+repo: "git · helm-maas" {
+  class: git
+
+  envs: "environments/\n  sandbox/values.yaml\n  prod/values.yaml" {
+    class: git
+  }
+  charts: "charts/maas-models\nthe templates" {
+    class: git
+  }
+}
+
+pr: "Pull request\nreview + CI\n(render invariants,\nhealth-check suite)" {
+  class: git
+}
+
+argocd: "Argo CD\nApplication per environment" {
+  class: argo
+
+  policy: "syncPolicy.automated: OFF\nprune: false · selfHeal: false\nno cascade-delete finalizer" {
+    class: human
+  }
+}
+
+ops: "Ops presses Sync" {
+  shape: person
+  class: human
+}
+
+cluster: "OpenShift cluster" {
+  class: wave
+
+  w0: "wave 0\nLLMInferenceService\nExternalModel" {
+    class: wave
+  }
+  w10: "wave 10\nMaaSModelRef\nMaaSAuthPolicy\nMaaSSubscription" {
+    class: wave
+    style.stroke-width: 4
+  }
+  w20: "wave 20\nPrometheusRule\ninventory ConfigMap" {
+    class: wave
+  }
+
+  w0 -> w10: "waits until models\nare actually serving"
+  w10 -> w20
+}
+
+repo.envs -> pr: "edit a model,\na quota, an entitlement"
+repo.charts -> pr
+pr -> argocd: "merged to main\n-> Argo CD reports OutOfSync"
+argocd -> ops: "waits for a human" {
+  style.stroke-dash: 3
+}
+ops -> cluster: Sync
+
+circular: |md
+  ### Why wave 10 holds three kinds at once
+
+  `MaaSModelRef` only reports `Ready` once a
+  `MaaSAuthPolicy` **and** a `MaaSSubscription`
+  cover it. Those two only report `Active` once
+  the `MaaSModelRef` they reference exists.
+
+  The dependency is circular, so all three are
+  applied **together**. Split them across waves
+  and the sync deadlocks: the earlier wave never
+  goes Healthy, so the later one is never
+  applied. `tests/render.sh` fails if the waves
+  drift apart.
+| {
+  near: bottom-center
+  style: {
+    font-size: 15
+    fill: "#f4fce3"
+    stroke: "#5c940d"
+  }
+}
+
+slow: |md
+  ### A slow first sync is expected
+
+  Wave 0 completes only once the model is serving.
+
+  A large model can sit in *Progressing* for 10–20 minutes.
+
+  That is the health check working, not a stuck sync.
+| {
+  near: top-center
+  style: {
+    font-size: 15
+    fill: "#fff4e6"
+    stroke: "#e8590c"
+  }
+}

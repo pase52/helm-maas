@@ -1,0 +1,157 @@
+# =============================================================================
+# Where model weights come from, and how the credentials reach the download
+# =============================================================================
+# Render:  d2 --sketch --theme 0 --dark-theme 200 04-model-weights.d2 04-model-weights.svg
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    sketch: true
+  }
+}
+
+direction: down
+
+classes: {
+  vault: {
+    style: {
+      fill: "#f8f0fc"
+      stroke: "#862e9c"
+      stroke-width: 2
+    }
+  }
+  chart: {
+    style: {
+      fill: "#f4fce3"
+      stroke: "#5c940d"
+      stroke-width: 2
+    }
+  }
+  kserve: {
+    style: {
+      fill: "#e7f5ff"
+      stroke: "#1971c2"
+      stroke-width: 2
+    }
+  }
+  store: {
+    style: {
+      fill: "#fff9db"
+      stroke: "#f08c00"
+      stroke-width: 2
+    }
+  }
+}
+
+vault: "HashiCorp Vault" {
+  class: vault
+
+  folder: "secret/maas/models/\n  granite-3-1-8b\n  llama-3-3-70b\n\none secret per model" {
+    class: vault
+  }
+}
+
+eso: "External Secrets Operator" {
+  class: chart
+
+  store: "ClusterSecretStore\nmaas-vault\n(Kubernetes auth —\nno static credential in-cluster)" {
+    class: chart
+  }
+  es: "ExternalSecret\nper model\nmergePolicy: Merge" {
+    class: chart
+    style.stroke-width: 4
+  }
+}
+
+secret: "Secret  maas-s3-<model>\n\nawsAccessKeyID\nawsSecretAccessKey\n+ serving.kserve.io/s3-* annotations" {
+  class: chart
+}
+
+sa: "ServiceAccount\nmaas-s3-<model>\nsecrets[] -> the Secret" {
+  class: chart
+}
+
+pod: "Model pod" {
+  class: kserve
+
+  init: "initContainer\nstorage-initializer\nargs: [s3://..., /mnt/models]" {
+    class: kserve
+  }
+  main: "container  main\nvLLM\nreads /mnt/models (ro)" {
+    class: kserve
+  }
+}
+
+vol: "Where the bytes land" {
+  class: store
+
+  emptydir: "emptyDir  (default)\nnode ephemeral storage" {
+    class: store
+  }
+  pvc: "PersistentVolumeClaim\npersistence.enabled\nstorageClassName · size · accessModes" {
+    class: store
+  }
+}
+
+bucket: "S3 / ODF bucket\nthe weights" {
+  class: store
+}
+
+vault.folder -> eso.store: "read via Kubernetes auth"
+eso.store -> eso.es
+eso.es -> secret: creates
+secret -> sa: "referenced by"
+sa -> pod: "spec.template.serviceAccountName" {
+  style.bold: true
+}
+pod.init -> bucket: "downloads with those credentials" {
+  style.stroke: "#1971c2"
+}
+bucket -> vol: writes
+vol -> pod.main: "mounted at /mnt/models"
+pod.init -> pod.main: "runs to completion first" {
+  style.stroke-dash: 3
+}
+
+volname: |md
+  ### The volume name is load-bearing
+
+  KServe creates its `emptyDir` **only if** no volume named
+  `kserve-provision-location` already exists on the pod.
+
+  Declaring one is how the chart substitutes a PVC.
+
+  Any other name and KServe adds its own emptyDir alongside:
+  the PVC binds, stays empty, and the weights go to node disk.
+| {
+  near: top-center
+  style: {
+    font-size: 15
+    fill: "#e7f5ff"
+    stroke: "#1971c2"
+  }
+}
+
+nodownload: |md
+  ### A PVC does *not* avoid the re-download
+
+  The storage-initializer writes into the target
+  directory unconditionally — there is no
+  skip-if-present for `s3://`. **Every pod start
+  re-downloads.** Persistence changes *where* the
+  bytes land, not whether they move.
+
+  What it buys: weights off node ephemeral
+  storage (no eviction, no contention with
+  co-scheduled pods), and models larger than the
+  node's disk become possible at all.
+
+  To download once: pre-populate a volume and use `modelUri: pvc://...`
+| {
+  near: bottom-center
+  style: {
+    font-size: 15
+    fill: "#fff5f5"
+    stroke: "#c92a2a"
+  }
+}

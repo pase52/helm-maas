@@ -9,6 +9,13 @@ Adding a model, changing who may call it, or raising a token quota is a pull
 request against a values file — reviewed, versioned and revertible. Argo CD shows
 whether each model is actually deployed and actually healthy.
 
+![From a values file to a serving model](docs/diagrams/02-gitops-flow.svg)
+
+More diagrams in [docs/diagrams](docs/diagrams): the
+[request path](docs/diagrams/01-request-path.svg),
+the [health model](docs/diagrams/03-health-model.svg), and
+[where model weights come from](docs/diagrams/04-model-weights.svg).
+
 ---
 
 ## Table of contents
@@ -78,6 +85,7 @@ environments/
 docs/
   ARCHITECTURE.md         How the pieces fit; design decisions and why
   HEALTH.md               Health model and runbook — alerts link here
+  diagrams/               D2 sources + rendered SVGs; render.sh regenerates
 
 tests/
   lua/run.sh              Executes the Argo CD health checks against fixtures
@@ -513,6 +521,8 @@ fails the render if anyone tries.
 
 `MaaSModelRef` is the one object worth watching: it aggregates backend readiness
 and governance into a single phase.
+
+![What Argo CD shows and what it means](docs/diagrams/03-health-model.svg)
 
 ```bash
 # The catalogue at a glance

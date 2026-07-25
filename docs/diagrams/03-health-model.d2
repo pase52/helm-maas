@@ -1,0 +1,125 @@
+# =============================================================================
+# The head-up view: what Argo CD shows, and what it means
+# =============================================================================
+# Render:  d2 --sketch --theme 0 --dark-theme 200 03-health-model.d2 03-health-model.svg
+#
+# Argo CD treats any CRD it does not recognise as Healthy. Without the custom
+# health checks, a permanently broken model shows a green tick.
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    sketch: true
+  }
+}
+
+direction: down
+
+classes: {
+  source: {
+    style: {
+      fill: "#f8f0fc"
+      stroke: "#862e9c"
+      stroke-width: 2
+    }
+  }
+  healthy: {
+    style: {
+      fill: "#ebfbee"
+      stroke: "#2b8a3e"
+      stroke-width: 2
+    }
+  }
+  progressing: {
+    style: {
+      fill: "#e7f5ff"
+      stroke: "#1971c2"
+      stroke-width: 2
+    }
+  }
+  degraded: {
+    style: {
+      fill: "#fff5f5"
+      stroke: "#c92a2a"
+      stroke-width: 3
+    }
+  }
+}
+
+modelref: "MaaSModelRef\nthe one object worth watching" {
+  class: source
+
+  phase: "status.phase" {
+    class: source
+  }
+  runtime: "condition\nRuntimeReady\n(is the backend serving?)" {
+    class: source
+  }
+  gov: "condition\nGovernanceAttached\n(is a policy + subscription pair active?)" {
+    class: source
+  }
+}
+
+lua: "Lua health check\ncharts/maas-gitops" {
+  style: {
+    fill: "#fff4e6"
+    stroke: "#e8590c"
+    stroke-width: 2
+  }
+}
+
+healthy: "Healthy\n\nServing at <endpoint>" {
+  class: healthy
+}
+
+progressing: "Progressing\n\nresolves on its own —\nmodel still loading" {
+  class: progressing
+}
+
+degraded: "Degraded\n\nneeds a human —\nwill still be broken tomorrow" {
+  class: degraded
+}
+
+modelref -> lua: "read by"
+lua -> healthy: "phase=Ready"
+lua -> progressing: "phase=Pending\nRuntimeReady=False (BackendNotReady)"
+lua -> degraded: "phase=Pending\nGovernanceAttached=False\n(NoPairingFound / GovernanceGap)" {
+  style.bold: true
+  style.stroke: "#c92a2a"
+}
+lua -> degraded: "phase=Unhealthy\ngoverned, but runtime failing = live outage"
+lua -> degraded: "phase=Failed / Invalid"
+
+rule: |md
+  ### The rule these checks follow
+
+  **Progressing** means *wait*. **Degraded** means *a human is needed*.
+
+  A model whose pods are fine but which no policy covers reports **Degraded**,
+  even though the CRD calls it `Pending` — it will never fix itself. Likewise an
+  `ImagePullBackOff` or `Unschedulable` LLMInferenceService is Degraded, while a
+  model still loading its weights is Progressing.
+| {
+  near: bottom-center
+  style: {
+    font-size: 15
+    fill: "#f8f9fa"
+    stroke: "#495057"
+  }
+}
+
+warn: |md
+  ### Install the health checks before the first sync
+
+  Without them Argo CD reports every `MaaSModelRef`, `MaaSAuthPolicy`,
+  `MaaSSubscription`, `ExternalModel` and `LLMInferenceService` **Healthy** the
+  instant it is created — whether or not the model ever serves a request.
+  One `oc patch`; step 1 of the README.
+| {
+  near: top-center
+  style: {
+    font-size: 15
+    fill: "#fff5f5"
+    stroke: "#c92a2a"
+  }
+}
